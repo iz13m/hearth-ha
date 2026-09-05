@@ -43,6 +43,38 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
 )
 DENIED_ENTITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera", "device_tracker", "person"})
 
+# Domains handled by their own capability, so device control never implicitly grants the
+# ability to run user-authored sequences.
+ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
+
+
+def find_service_call_violations(domain: str, service: str, entity_ids: list[str]) -> list[str]:
+    """Mirror of findServiceCallViolations in packages/shared/src/policy.ts."""
+    import re  # noqa: PLC0415
+
+    problems: list[str] = []
+    full = f"{domain}.{service}"
+    if not re.fullmatch(r"[a-z0-9_]+", domain) or not re.fullmatch(r"[a-z0-9_]+", service):
+        return [f"{full}: malformed service name"]
+    if domain in DENIED_ACTION_DOMAINS:
+        problems.append(f"{full}: domain {domain} can never be controlled")
+    if full in DENIED_ACTIONS:
+        problems.append(f"{full}: not allowed")
+    if domain in ROUTINE_DOMAINS:
+        problems.append(f"{full}: use scenes.activate or scripts.run instead of calling the {domain} domain directly")
+    if not entity_ids:
+        problems.append(f"{full}: at least one entity_id is required (broad targets are not allowed)")
+    for eid in entity_ids:
+        d = _domain(eid)
+        if not d:
+            problems.append(f"{eid}: malformed entity_id")
+        elif d in DENIED_ENTITY_DOMAINS:
+            problems.append(f"{eid}: entities in {d} can never be controlled")
+        elif d in ROUTINE_DOMAINS:
+            problems.append(f"{eid}: use scenes.activate or scripts.run for {d} entities")
+    return list(dict.fromkeys(problems))
+
+
 _LIST_KEYS = {"actions", "action", "sequence", "then", "else", "default", "parallel", "choose", "options", "repeat", "if", "conditions"}
 
 

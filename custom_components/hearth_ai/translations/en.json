@@ -39,7 +39,7 @@
       },
       "capabilities": {
         "title": "What the AI may access",
-        "description": "Each switch grants the AI (your own AI client through the Hearth connector, and the Managed assistant) one area. Reads never change anything; writes create, edit, and delete items the same way the Home Assistant editor does. On top of these, only entities exposed to Assist (Settings → Voice assistants → Expose) are ever visible. Locks, cameras, alarms, and locations are never accessible, even inside automations.",
+        "description": "Each switch grants the AI (your own AI client through the Hearth connector, and the Managed assistant) one area. Reads never change anything. Writes create, edit, and delete items the same way the Home Assistant editor does. The last two let it act on your home immediately and are off until you turn them on. On top of all of this, only entities exposed to Assist (Settings \u2192 Voice assistants \u2192 Expose) are ever visible, and locks, alarms, cameras, and location entities are never accessible.",
         "data": {
           "cap_entities_read": "Read entities, states, and areas",
           "cap_services_read": "Read the service catalog (for authoring actions)",
@@ -48,7 +48,13 @@
           "cap_scenes_read": "Read scenes",
           "cap_scenes_write": "Create, edit, and delete scenes",
           "cap_scripts_read": "Read scripts",
-          "cap_scripts_write": "Create, edit, and delete scripts"
+          "cap_scripts_write": "Create, edit, and delete scripts",
+          "cap_devices_control": "Control devices now (lights, switches, climate, covers, media, and so on)",
+          "cap_routines_run": "Activate scenes and run scripts you already created"
+        },
+        "data_description": {
+          "cap_devices_control": "Lets it act on your home as you speak, for example \"turn on the kitchen lights\". Locks, alarms, and cameras stay blocked.",
+          "cap_routines_run": "A script does whatever you wrote in it, which may include actions Hearth itself is not allowed to perform. Enable this only if you trust your own scripts."
         }
       },
       "assistant": {
@@ -76,10 +82,14 @@
   },
   "entity": {
     "switch": {
-      "connection": { "name": "Connection" }
+      "connection": {
+        "name": "Connection"
+      }
     },
     "binary_sensor": {
-      "connected": { "name": "Connected" }
+      "connected": {
+        "name": "Connected"
+      }
     }
   }
 }

@@ -2,9 +2,11 @@
 
 Connects your Home Assistant to [Hearth](https://app.example.com) so an LLM can author automations, scenes, and scripts for you.
 
-**What it can do:** list areas/entities/states (read-only), and create/edit/delete automations, scenes, and scripts — the same files the UI editor writes.
+**What it can do:** list areas/entities/states (read-only), and create/edit/delete automations, scenes, and scripts — the same files the UI editor writes. If you switch them on, it can also operate your devices, activate scenes, and run scripts.
 
-**What it can never do:** call services, trigger automations, run scripts, unlock doors, view cameras. The method allowlist is enforced inside this integration, independently of the Hearth cloud.
+**You choose what it may touch**, per installation, under Settings → Devices & services → Hearth AI → Configure. Controlling devices and running scenes/scripts are **off by default**. Only entities you exposed to Assist are ever visible.
+
+**What it can never do:** unlock doors, disarm alarms, view cameras, read location entities, or reach host-level services such as `shell_command`, `hassio`, or `homeassistant.restart` — not directly, and not by writing them into an automation. Automations can be authored but never fired. Every rule is enforced inside this integration, independently of the Hearth cloud.
 
 ## Requirements
 Home Assistant **2025.8 or newer** (the options flow uses `OptionsFlowWithReload`).

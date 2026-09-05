@@ -38,7 +38,23 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "capabilities"})
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "capabilities"
     keys = {str(k) for k in result["data_schema"].schema}
-    assert keys == {"cap_entities_read", "cap_services_read", "cap_automations_read", "cap_automations_write", "cap_scenes_read", "cap_scenes_write", "cap_scripts_read", "cap_scripts_write"}
+    assert keys == {
+        "cap_entities_read",
+        "cap_services_read",
+        "cap_automations_read",
+        "cap_automations_write",
+        "cap_scenes_read",
+        "cap_scenes_write",
+        "cap_scripts_read",
+        "cap_scripts_write",
+        "cap_devices_control",
+        "cap_routines_run",
+    }
+    # Operating the home is off until the owner opts in; everything else defaults on.
+    defaults = {str(k): k.default() for k in result["data_schema"].schema}
+    assert defaults["cap_devices_control"] is False
+    assert defaults["cap_routines_run"] is False
+    assert defaults["cap_entities_read"] is True
 
     with patch("custom_components.hearth_ai.HearthClient.start") as start:
         result = await hass.config_entries.options.async_configure(

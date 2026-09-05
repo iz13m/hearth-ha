@@ -41,6 +41,9 @@ ALLOWED_METHODS: frozenset[str] = frozenset(
         "scripts.create",
         "scripts.update",
         "scripts.delete",
+        "devices.call",
+        "scenes.activate",
+        "scripts.run",
     }
 )
 
@@ -124,10 +127,11 @@ class Dispatcher:
 
 def build_dispatcher(hass: HomeAssistant, capabilities: frozenset[str] | None = None) -> Dispatcher:
     """Create the dispatcher with every handler registered (gating happens at dispatch)."""
-    from .handlers import automations, registry, scenes, scripts  # noqa: PLC0415
+    from .handlers import automations, control, registry, scenes, scripts  # noqa: PLC0415
 
     d = Dispatcher(hass, capabilities)
     registry.register(d)
+    control.register(d)
     automations.register(d)
     scenes.register(d)
     scripts.register(d)

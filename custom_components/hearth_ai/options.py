@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 
 from .const import (
     ASSISTANT_MODE_MANAGED,
+    OPT_IN_CAPABILITIES,
     ASSISTANT_MODES,
     OPT_ASSISTANT_MODE,
     OPT_CONNECTION_ENABLED,
@@ -23,7 +24,7 @@ class HearthOptions:
     connection_enabled: bool = True
     assistant_mode: str = ASSISTANT_MODE_MANAGED
     model: str = ""
-    enabled_caps: frozenset[str] = frozenset(TOGGLEABLE_CAPABILITIES)
+    enabled_caps: frozenset[str] = frozenset(c for c in TOGGLEABLE_CAPABILITIES if c not in OPT_IN_CAPABILITIES)
 
     @classmethod
     def from_mapping(cls, options: Any) -> HearthOptions:
@@ -35,7 +36,10 @@ class HearthOptions:
             connection_enabled=bool(options.get(OPT_CONNECTION_ENABLED, True)),
             assistant_mode=mode,
             model=str(options.get(OPT_MODEL) or ""),
-            enabled_caps=frozenset(c for c in TOGGLEABLE_CAPABILITIES if bool(options.get(option_key(c), True))),
+            # Reading and authoring default on; operating the home defaults off.
+            enabled_caps=frozenset(
+                c for c in TOGGLEABLE_CAPABILITIES if bool(options.get(option_key(c), c not in OPT_IN_CAPABILITIES))
+            ),
         )
 
     @classmethod
