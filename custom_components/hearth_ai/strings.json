@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Hearth",
+        "description": "Paste the pairing token from your Hearth dashboard. The integration will open an outbound connection to Hearth; no ports need to be forwarded.",
+        "data": {
+          "pairing_token": "Pairing token",
+          "hub_url": "Hearth URL"
+        }
+      }
+    },
+    "error": {
+      "invalid_token": "That pairing token is invalid or has expired. Generate a new one in the Hearth dashboard.",
+      "invalid_url": "The Hearth URL must start with https://",
+      "rate_limited": "Too many attempts. Wait a minute and try again.",
+      "cannot_connect": "Could not reach Hearth. Check the URL and your internet connection."
+    },
+    "abort": {
+      "already_configured": "This Hearth installation is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hearth AI settings",
+        "menu_options": {
+          "connection": "Connection to Hearth",
+          "capabilities": "What the AI may access",
+          "assistant": "Assistant mode and model"
+        }
+      },
+      "connection": {
+        "title": "Connection to Hearth",
+        "description": "Installation {installation_id} at {hub_url} is currently {status}. Turning the connection off closes the outbound link immediately; nothing can reach this Home Assistant until you turn it back on. The connection switch entity does the same.",
+        "data": {
+          "connection_enabled": "Connect to Hearth"
+        }
+      },
+      "capabilities": {
+        "title": "What the AI may access",
+        "description": "Each switch grants the AI (your own AI client through the Hearth connector, and the Managed assistant) one area. Reads never change anything; writes create, edit, and delete items the same way the Home Assistant editor does. On top of these, only entities exposed to Assist (Settings → Voice assistants → Expose) are ever visible. Locks, cameras, alarms, and locations are never accessible, even inside automations.",
+        "data": {
+          "cap_entities_read": "Read entities, states, and areas",
+          "cap_services_read": "Read the service catalog (for authoring actions)",
+          "cap_automations_read": "Read automations",
+          "cap_automations_write": "Create, edit, and delete automations",
+          "cap_scenes_read": "Read scenes",
+          "cap_scenes_write": "Create, edit, and delete scenes",
+          "cap_scripts_read": "Read scripts",
+          "cap_scripts_write": "Create, edit, and delete scripts"
+        }
+      },
+      "assistant": {
+        "title": "Assistant mode and model",
+        "description": "Hearth subscription: {tier} (active: {active}, renews {period_end}). Manage it at {dashboard_url}.\n\n**Managed** answers inside Home Assistant Assist using the Hearth subscription. **Bring your own AI** means you talk to Claude, ChatGPT, or Gemini directly and add this connector to it: {mcp_url} (see the dashboard for setup steps). **Off** removes the in-HA assistant. Model list: {models_source}.",
+        "data": {
+          "assistant_mode": "Assistant mode",
+          "model": "Model for the Managed assistant"
+        }
+      }
+    },
+    "error": {
+      "invalid_model": "That model is not available on your plan.",
+      "cannot_connect": "Could not reach Hearth."
+    }
+  },
+  "selector": {
+    "assistant_mode": {
+      "options": {
+        "managed": "Managed (Hearth subscription, chat inside Home Assistant)",
+        "byo": "Bring your own AI (Claude / ChatGPT / Gemini via the Hearth connector)",
+        "off": "Off (no assistant in Home Assistant)"
+      }
+    }
+  },
+  "entity": {
+    "switch": {
+      "connection": { "name": "Connection" }
+    },
+    "binary_sensor": {
+      "connected": { "name": "Connected" }
+    }
+  }
+}

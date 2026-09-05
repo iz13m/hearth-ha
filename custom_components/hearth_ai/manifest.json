@@ -1,0 +1,14 @@
+{
+  "domain": "hearth_ai",
+  "name": "Hearth AI",
+  "codeowners": ["@hearth-ai"],
+  "config_flow": true,
+  "dependencies": ["conversation"],
+  "after_dependencies": ["automation", "scene", "script"],
+  "documentation": "https://github.com/hearth-ai/hearth-ha",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/hearth-ai/hearth-ha/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

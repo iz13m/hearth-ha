@@ -1,0 +1,23 @@
+[project]
+name = "hearth-ha-integration"
+version = "0.1.0"
+description = "Hearth AI Home Assistant custom integration (tests + tooling)"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest-homeassistant-custom-component",
+  "pytest-asyncio",
+  "hassil",
+  "home-assistant-intents",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
