@@ -38,9 +38,19 @@ def test_attribute_denylist_matches_shared() -> None:
 
 
 def test_control_is_limited_to_opt_in_methods() -> None:
-    """Operating the home is possible, but only through these three opt-in methods."""
+    """Operating the home is possible, but only through these opt-in methods."""
     control = {m for m in ALLOWED_METHODS if CAPABILITY_FOR_METHOD[m] in OPT_IN_CAPABILITIES}
-    assert control == {"devices.call", "scenes.activate", "scripts.run"}
+    assert control == {
+        "devices.call",
+        "scenes.activate",
+        "scripts.run",
+        "integrations.list",
+        "integrations.discovered",
+        "integrations.available",
+        "integrations.flow_start",
+        "integrations.flow_step",
+        "integrations.flow_abort",
+    }
     for m in ALLOWED_METHODS:
         for banned in ("lock", "camera", "alarm", "shell", "restart"):
             assert banned not in m, m

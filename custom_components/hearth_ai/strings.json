@@ -50,11 +50,13 @@
           "cap_scripts_read": "Read scripts",
           "cap_scripts_write": "Create, edit, and delete scripts",
           "cap_devices_control": "Control devices now (lights, switches, climate, covers, media, and so on)",
-          "cap_routines_run": "Activate scenes and run scripts you already created"
+          "cap_routines_run": "Activate scenes and run scripts you already created",
+          "cap_integrations_manage": "Add and set up new integrations (devices, services)"
         },
         "data_description": {
           "cap_devices_control": "Lets it act on your home as you speak, for example \"turn on the kitchen lights\". Locks, alarms, and cameras stay blocked.",
-          "cap_routines_run": "A script does whatever you wrote in it, which may include actions Hearth itself is not allowed to perform. Enable this only if you trust your own scripts."
+          "cap_routines_run": "A script does whatever you wrote in it, which may include actions Hearth itself is not allowed to perform. Enable this only if you trust your own scripts.",
+          "cap_integrations_manage": "Lets it search integrations and walk through setup, filling things like IP addresses. It will never send a password, API key, or token: those steps are handed back for you to finish in Home Assistant."
         }
       },
       "assistant": {

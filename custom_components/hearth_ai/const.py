@@ -38,10 +38,11 @@ CAPABILITIES: tuple[str, ...] = (
     "scripts.write",
     "devices.control",
     "routines.run",
+    "integrations.manage",
     "conversation",
 )
 # Capabilities that operate the home; off until the owner switches them on.
-OPT_IN_CAPABILITIES: frozenset[str] = frozenset({"devices.control", "routines.run"})
+OPT_IN_CAPABILITIES: frozenset[str] = frozenset({"devices.control", "routines.run", "integrations.manage"})
 # Capabilities the user toggles in the options UI (`conversation` is derived from the assistant mode).
 TOGGLEABLE_CAPABILITIES: tuple[str, ...] = tuple(c for c in CAPABILITIES if c != "conversation")
 CAPABILITY_FOR_METHOD: dict[str, str] = {
@@ -69,6 +70,12 @@ CAPABILITY_FOR_METHOD: dict[str, str] = {
     "devices.call": "devices.control",
     "scenes.activate": "routines.run",
     "scripts.run": "routines.run",
+    "integrations.list": "integrations.manage",
+    "integrations.discovered": "integrations.manage",
+    "integrations.available": "integrations.manage",
+    "integrations.flow_start": "integrations.manage",
+    "integrations.flow_step": "integrations.manage",
+    "integrations.flow_abort": "integrations.manage",
 }
 CAPABILITIES_VERSION = 2
 

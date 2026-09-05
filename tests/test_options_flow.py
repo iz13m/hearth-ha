@@ -49,11 +49,13 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
         "cap_scripts_write",
         "cap_devices_control",
         "cap_routines_run",
+        "cap_integrations_manage",
     }
     # Operating the home is off until the owner opts in; everything else defaults on.
     defaults = {str(k): k.default() for k in result["data_schema"].schema}
     assert defaults["cap_devices_control"] is False
     assert defaults["cap_routines_run"] is False
+    assert defaults["cap_integrations_manage"] is False
     assert defaults["cap_entities_read"] is True
 
     with patch("custom_components.hearth_ai.HearthClient.start") as start:
