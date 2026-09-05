@@ -62,3 +62,12 @@ def test_capability_table_matches_shared() -> None:
     assert data["capability_for_method"] == CAPABILITY_FOR_METHOD
     assert data["capabilities_version"] == CAPABILITIES_VERSION
     assert set(CAPABILITY_FOR_METHOD) == ALLOWED_METHODS
+
+
+def test_reported_version_matches_the_manifest() -> None:
+    """HACS installs the manifest version; the hub must be told the same one."""
+    from custom_components.hearth_ai.const import INTEGRATION_VERSION
+
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "custom_components" / "hearth_ai" / "manifest.json").read_text())
+    assert INTEGRATION_VERSION == manifest["version"]
+    assert INTEGRATION_VERSION.count(".") == 2

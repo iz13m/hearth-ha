@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 DOMAIN = "hearth_ai"
-INTEGRATION_VERSION = "0.1.0"
+# Read from the manifest (loaded in an executor at import time) so the version we report to the
+# hub can never drift from the version HACS installed.
+INTEGRATION_VERSION: str = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))["version"]
 
 CONF_HUB_URL = "hub_url"
 CONF_PAIRING_TOKEN = "pairing_token"
