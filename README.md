@@ -6,6 +6,9 @@ Connects your Home Assistant to [Hearth](https://app.example.com) so an LLM can 
 
 **What it can never do:** call services, trigger automations, run scripts, unlock doors, view cameras. The method allowlist is enforced inside this integration, independently of the Hearth cloud.
 
+## Requirements
+Home Assistant **2025.8 or newer** (the options flow uses `OptionsFlowWithReload`).
+
 ## Install
 1. HACS → Integrations → ⋮ → *Custom repositories* → add this repo (category *Integration*).
 2. Install **Hearth AI**, restart Home Assistant.

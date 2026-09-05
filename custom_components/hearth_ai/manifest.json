@@ -1,14 +1,22 @@
 {
   "domain": "hearth_ai",
   "name": "Hearth AI",
-  "codeowners": ["@hearth-ai"],
+  "codeowners": [
+    "@iz13m"
+  ],
   "config_flow": true,
-  "dependencies": ["conversation"],
-  "after_dependencies": ["automation", "scene", "script"],
-  "documentation": "https://github.com/hearth-ai/hearth-ha",
+  "dependencies": [
+    "conversation"
+  ],
+  "after_dependencies": [
+    "automation",
+    "scene",
+    "script"
+  ],
+  "documentation": "https://github.com/iz13m/hearth-ha",
   "integration_type": "service",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/hearth-ai/hearth-ha/issues",
+  "issue_tracker": "https://github.com/iz13m/hearth-ha/issues",
   "requirements": [],
   "version": "0.1.0"
 }
