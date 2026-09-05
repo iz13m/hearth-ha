@@ -10,7 +10,7 @@ Connects your Home Assistant to [Hearth](https://app.example.com) so an LLM can 
 Home Assistant **2025.8 or newer** (the options flow uses `OptionsFlowWithReload`).
 
 ## Install
-1. HACS → Integrations → ⋮ → *Custom repositories* → add this repo (category *Integration*).
+1. HACS → Integrations → ⋮ → *Custom repositories* → add `https://github.com/iz13m/hearth-ha` (category *Integration*).
 2. Install **Hearth AI**, restart Home Assistant.
 3. Settings → Devices & services → *Add integration* → **Hearth AI**.
 4. Paste the pairing token from your Hearth dashboard. Done.
