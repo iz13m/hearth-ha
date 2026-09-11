@@ -16,6 +16,7 @@ from ..policy import find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .registry import _exposed
+from .scenes import scene_run_violations
 
 # Service calls can legitimately take a while (thermostats, media players); scripts return
 # as soon as they start.
@@ -83,6 +84,11 @@ async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_doma
         raise RpcError("invalid_params", f"entity_id must be a {expected_domain} entity")
     if hass.states.get(entity_id) is None:
         raise RpcError("not_found", f"unknown entity {entity_id}")
+    # Exposure is the owner's consent, and it gates running a routine exactly as it gates a direct
+    # service call. `devices_call` has always checked this; running a scene or script did not, which
+    # made activation the one way to reach an entity the owner kept out of Assist.
+    if not _exposed(hass, entity_id):
+        raise RpcError("not_found", f"{entity_id} is not exposed to Assist")
     try:
         async with asyncio.timeout(CALL_TIMEOUT_S):
             await hass.services.async_call(expected_domain, "turn_on", {"entity_id": entity_id}, blocking=True)
@@ -92,11 +98,24 @@ async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_doma
 
 
 async def scenes_activate(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
+    """
+    A scene applies whatever states it defines, so what it *contains* is checked here — not only
+    when Hearth writes one. Otherwise a scene the owner wrote by hand could set a lock, and
+    activating it would apply that, around the promise that locks are refused everywhere.
+    """
+    entity_id = require_str(params, "entity_id")
+    if entity_id.startswith("scene.") and hass.states.get(entity_id) is not None:
+        if violations := await scene_run_violations(hass, entity_id):
+            raise RpcError("method_not_allowed", "; ".join(violations))
     return await _run_entity(hass, params, "scene")
 
 
 async def scripts_run(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
-    """Runs whatever the user wrote in that script — including actions Hearth itself may not perform."""
+    """
+    Runs whatever the user wrote in that script — including actions Hearth itself may not perform.
+    That is a deliberate, documented decision (AgDR-0005), unlike scenes: a script is a sequence the
+    owner authored and exposed, and the options UI says so plainly. Exposure is still required.
+    """
     return await _run_entity(hass, params, "script")
 
 

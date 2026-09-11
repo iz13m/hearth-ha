@@ -19,6 +19,7 @@ from homeassistant.util import slugify
 from ..policy import find_policy_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
+from .registry import _exposed
 
 _SLUG = re.compile(r"^[a-z0-9_]+$")
 
@@ -67,6 +68,8 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
                 "alias": state.name,
                 "description": None,
                 "editable": key in file_keys,
+                # Listed either way: an un-exposed script can still be read and edited, just not run.
+                "can_run": _exposed(hass, state.entity_id),
             }
         )
     return out
