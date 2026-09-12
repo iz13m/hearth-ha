@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import HomeAssistant
 
+from custom_components.hearth_ai.handlers import control
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 TEST = "input_boolean.test"
@@ -188,3 +191,27 @@ async def test_scene_and_script_lists_report_whether_they_can_be_run(core: HomeA
     core.states.async_set("scene.side_door", "unknown", {"friendly_name": "Side door", "entity_id": ["lock.side"]})
     async_expose_entity(core, "conversation", "scene.side_door", True)
     assert row(await d.dispatch("scenes.list", {}), "scene.side_door")["can_run"] is False
+
+
+async def test_reports_the_state_the_device_actually_reached(core: HomeAssistant) -> None:
+    """
+    `blocking=True` waits for the service handler, not for the entity to write its state, so reading
+    straight afterwards used to return the *pre-call* value — the app's tile flipped back and people
+    pressed twice. The call now waits for the entity to report before answering.
+    """
+    d = build_dispatcher(core)
+    await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_on", "entity_id": [TEST]})
+    result = await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_off", "entity_id": [TEST]})
+    assert result["entities"] == [{"entity_id": TEST, "state": "off"}], "reported a state the device had not reached"
+    assert core.states.get(TEST).state == "off"
+
+
+async def test_a_command_that_changes_nothing_still_answers(core: HomeAssistant) -> None:
+    """No state event fires, so this is the path that waits out SETTLE_TIMEOUT_S. It must not hang."""
+    d = build_dispatcher(core)
+    await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_off", "entity_id": [TEST]})
+    result = await asyncio.wait_for(
+        d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_off", "entity_id": [TEST]}),
+        timeout=control.SETTLE_TIMEOUT_S + 5,
+    )
+    assert result["entities"] == [{"entity_id": TEST, "state": "off"}]

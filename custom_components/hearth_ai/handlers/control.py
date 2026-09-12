@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant
+from homeassistant.helpers.event import async_track_state_change_event
 
 from ..policy import find_service_call_violations
 from ..rpc import Dispatcher, RpcError
@@ -22,6 +23,17 @@ from .scenes import scene_run_violations
 # as soon as they start.
 CALL_TIMEOUT_S = 30
 MAX_DATA_KEYS = 32
+# How long to wait for the targeted entities to write their new state before reporting it.
+#
+# `blocking=True` waits for the *service handler* to return, not for the entity to push its new
+# state into the state machine — plenty of integrations write asynchronously, after a device ack or
+# on the next coordinator tick. Reading straight afterwards therefore returned the *pre-call* state
+# often enough that the app's tile flipped back and people pressed twice.
+#
+# A command that genuinely changes nothing (turn_on on a light already on) fires no event and waits
+# the whole window; that is the price of never reporting a state the device has not reached, and it
+# is bounded well under the round trip the caller already paid for.
+SETTLE_TIMEOUT_S = 1.0
 # Keys that would widen a call beyond the entity_ids we validated.
 TARGET_KEYS = frozenset({"entity_id", "device_id", "area_id", "floor_id", "label_id", "target"})
 
@@ -40,6 +52,34 @@ def _clean_data(data: Any) -> dict[str, Any]:
 def _state_of(hass: HomeAssistant, entity_id: str) -> str | None:
     state = hass.states.get(entity_id)
     return state.state if state else None
+
+
+async def _settled(hass: HomeAssistant, entity_ids: list[str], call: Any) -> None:
+    """
+    Run `call` and wait (briefly) for every targeted entity to write a new state.
+
+    The listener is registered *before* the service call so an integration that writes state
+    synchronously cannot slip through the gap between the two.
+    """
+    waiting = set(entity_ids)
+    done = asyncio.Event()
+
+    def _seen(event: Event[EventStateChangedData]) -> None:
+        waiting.discard(event.data["entity_id"])
+        if not waiting:
+            done.set()
+
+    unsub = async_track_state_change_event(hass, entity_ids, _seen)
+    try:
+        await call
+        async with asyncio.timeout(SETTLE_TIMEOUT_S):
+            await done.wait()
+    except TimeoutError:
+        # Nothing reported in time. Whatever the state machine holds is the honest answer — for a
+        # command that changed nothing it is already correct, and otherwise the next poll settles it.
+        pass
+    finally:
+        unsub()
 
 
 async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
@@ -68,7 +108,11 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
     data = _clean_data(params.get("data"))
     try:
         async with asyncio.timeout(CALL_TIMEOUT_S):
-            await hass.services.async_call(domain, service, {**data, "entity_id": raw_ids}, blocking=True)
+            await _settled(
+                hass,
+                raw_ids,
+                hass.services.async_call(domain, service, {**data, "entity_id": raw_ids}, blocking=True),
+            )
     except TimeoutError as err:
         raise RpcError("timeout", f"{domain}.{service} did not finish within {CALL_TIMEOUT_S}s") from err
 

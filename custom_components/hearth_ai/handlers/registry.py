@@ -58,6 +58,28 @@ def filter_attributes(attrs: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def entity_dto(state: Any, ent: Any, area_id: str | None) -> dict[str, Any]:
+    """One entity in the shape `Entity` describes, so a pushed change and a polled one agree."""
+    return {
+        "entity_id": state.entity_id,
+        "name": state.name,
+        "domain": state.domain,
+        "area_id": area_id,
+        "device_id": ent.device_id if ent else None,
+        "state": state.state,
+        "attributes": filter_attributes(dict(state.attributes)),
+    }
+
+
+def visible(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
+    """The same visibility rules `entities.list` applies, so push and poll cannot disagree."""
+    if entity_id.split(".", 1)[0] in HIDDEN_DOMAINS:
+        return False
+    if ent is not None and (ent.hidden_by or ent.disabled_by):
+        return False
+    return _exposed(hass, entity_id)
+
+
 async def areas_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[str, Any]]:
     reg = ar.async_get(hass)
     return [
@@ -103,17 +125,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         name = state.name
         if query and query not in state.entity_id.lower() and query not in (name or "").lower():
             continue
-        out.append(
-            {
-                "entity_id": state.entity_id,
-                "name": name,
-                "domain": state.domain,
-                "area_id": entity_area,
-                "device_id": ent.device_id if ent else None,
-                "state": state.state,
-                "attributes": filter_attributes(dict(state.attributes)),
-            }
-        )
+        out.append(entity_dto(state, ent, entity_area))
         if len(out) >= limit:
             break
     return out

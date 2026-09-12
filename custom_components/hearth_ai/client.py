@@ -24,6 +24,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CAPABILITIES,
+    PUSH_TIMEOUT_S,
     CAPABILITIES_VERSION,
     CHAT_TIMEOUT_S,
     HEARTBEAT_TIMEOUT_S,
@@ -34,6 +35,7 @@ from .const import (
     RECONNECT_MIN_S,
 )
 from .rpc import Dispatcher, RpcError
+from .subscriber import StateSubscriber
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +60,11 @@ class HearthClient:
         self._on_status = on_status
         self._task: asyncio.Task[None] | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
+        # Pushes exposed-entity state so the app does not have to poll for it. Only runs while the
+        # socket is up, and only when the owner left the capability on.
+        self._subscriber: StateSubscriber | None = (
+            StateSubscriber(hass, self._push_states) if "entities.subscribe" in self.capabilities else None
+        )
         self._pending: dict[str, asyncio.Future[Any]] = {}
         self._stopping = False
         self.connected = False
@@ -140,6 +147,8 @@ class HearthClient:
             finally:
                 if not hello_task.done():
                     hello_task.cancel()
+                if self._subscriber is not None:
+                    self._subscriber.stop()
                 self._ws = None
                 self._fail_pending("connection closed")
                 for t in list(self.inflight):
@@ -160,6 +169,9 @@ class HearthClient:
             self.installation_id = result.get("installation_id")
             self.last_error = None
             self._set_connected(True)
+            # After hello, never before: the hub rejects anything else until the handshake is done.
+            if self._subscriber is not None:
+                self._subscriber.start()
             _LOGGER.info("connected to Hearth hub as installation %s", self.installation_id)
         except RpcError as err:
             self.last_error = f"hello failed: {err.message}"
@@ -231,6 +243,17 @@ class HearthClient:
             raise RpcError("timeout", f"hub did not answer {method} within {timeout}s") from err
         finally:
             self._pending.pop(req_id, None)
+
+    async def _push_states(self, entities: list[dict[str, Any]]) -> None:
+        """
+        Deliver a batch of changed entities. Best effort by design: if the socket is down or the hub
+        is slow, the change is dropped rather than queued — the app's fallback poll is the floor, and
+        a backlog of stale states delivered after a reconnect would fight it.
+        """
+        ws = self._ws
+        if ws is None or ws.closed:
+            return
+        await self.async_call("entities.changed", {"entities": entities}, timeout=PUSH_TIMEOUT_S)
 
     def _resolve(self, frame: dict[str, Any]) -> None:
         fut = self._pending.get(str(frame.get("id", "")))

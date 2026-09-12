@@ -25,10 +25,13 @@ RECONNECT_MIN_S = 1
 RECONNECT_MAX_S = 60
 CHAT_TIMEOUT_S = 150
 HELLO_TIMEOUT_S = 10
+# A pushed state change is worthless once it is stale, so it waits far less than a chat turn.
+PUSH_TIMEOUT_S = 10
 
 # --- Capability model: verbatim mirror of packages/shared/src/capabilities.ts (pinned by tests) ---
 CAPABILITIES: tuple[str, ...] = (
     "entities.read",
+    "entities.subscribe",
     "services.read",
     "automations.read",
     "automations.write",

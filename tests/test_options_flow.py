@@ -40,6 +40,7 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
     keys = {str(k) for k in result["data_schema"].schema}
     assert keys == {
         "cap_entities_read",
+        "cap_entities_subscribe",
         "cap_services_read",
         "cap_automations_read",
         "cap_automations_write",
@@ -57,6 +58,8 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
     assert defaults["cap_routines_run"] is False
     assert defaults["cap_integrations_manage"] is False
     assert defaults["cap_entities_read"] is True
+    # Pushing state grants no access polling did not already have, so it is on like the other reads.
+    assert defaults["cap_entities_subscribe"] is True
 
     with patch("custom_components.hearth_ai.HearthClient.start") as start:
         result = await hass.config_entries.options.async_configure(
