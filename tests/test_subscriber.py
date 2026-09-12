@@ -36,7 +36,7 @@ async def test_pushes_a_change_in_the_entities_list_shape(core: HomeAssistant) -
     assert len(sent) == 1
     [entity] = sent[0]
     # The same shape `entities.list` returns, so the hub projects push and poll identically.
-    assert set(entity) == {"entity_id", "name", "domain", "area_id", "device_id", "state", "attributes"}
+    assert set(entity) == {"entity_id", "name", "domain", "area_id", "device_id", "device_name", "state", "attributes"}
     assert entity["entity_id"] == TEST
     assert entity["state"] == "on"
 

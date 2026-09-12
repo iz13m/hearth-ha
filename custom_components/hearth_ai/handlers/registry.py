@@ -58,14 +58,37 @@ def filter_attributes(attrs: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def entity_dto(state: Any, ent: Any, area_id: str | None) -> dict[str, Any]:
-    """One entity in the shape `Entity` describes, so a pushed change and a polled one agree."""
+def _device_name(ent: Any, dev_reg: dr.DeviceRegistry | None) -> str | None:
+    """The name of the physical device an entity belongs to, as the owner sees it in HA.
+
+    `name_by_user` first: it is what the owner typed ("Switch by the door"), where `name` is usually
+    the manufacturer's model string. This is metadata the owner already entered, read inside the
+    existing entities.read capability, so it needs no capability of its own.
+    """
+    if ent is None or not ent.device_id or dev_reg is None:
+        return None
+    dev = dev_reg.async_get(ent.device_id)
+    if dev is None:
+        return None
+    name = dev.name_by_user or dev.name
+    if not isinstance(name, str) or not name:
+        return None
+    return name[:MAX_ATTR_STR]
+
+
+def entity_dto(state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegistry | None) -> dict[str, Any]:
+    """One entity in the shape `Entity` describes, so a pushed change and a polled one agree.
+
+    Takes the device registry rather than a precomputed name so that both callers — the list
+    handler and the push subscriber — get the device name without either being able to forget it.
+    """
     return {
         "entity_id": state.entity_id,
         "name": state.name,
         "domain": state.domain,
         "area_id": area_id,
         "device_id": ent.device_id if ent else None,
+        "device_name": _device_name(ent, dev_reg),
         "state": state.state,
         "attributes": filter_attributes(dict(state.attributes)),
     }
@@ -134,7 +157,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         name = state.name
         if query and query not in state.entity_id.lower() and query not in (name or "").lower():
             continue
-        out.append(entity_dto(state, ent, entity_area))
+        out.append(entity_dto(state, ent, entity_area, dev_reg))
         if len(out) >= limit:
             break
     return out
