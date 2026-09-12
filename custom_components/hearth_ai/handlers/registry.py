@@ -10,6 +10,7 @@ from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
     entity_registry as er,
+    floor_registry as fr,
 )
 from homeassistant.helpers.service import async_get_all_descriptions
 
@@ -104,11 +105,28 @@ def visible(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
 
 
 async def areas_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Areas, each with its floor's storey number and name when it is on one.
+
+    The floor fields ride on the area rather than in a sibling `floors` list so the result stays an
+    array: a hub that predates them ignores two extra keys, where an object in place of the array
+    would break it. A floor slug ("first_floor") says nothing about order; `level` does, and it is
+    something the owner already set in Home Assistant.
+    """
     reg = ar.async_get(hass)
-    return [
-        {"area_id": a.id, "name": a.name, "floor_id": a.floor_id}
-        for a in sorted(reg.async_list_areas(), key=lambda a: a.name.lower())
-    ]
+    floors = fr.async_get(hass)
+    out: list[dict[str, Any]] = []
+    for a in sorted(reg.async_list_areas(), key=lambda a: a.name.lower()):
+        floor = floors.async_get_floor(a.floor_id) if a.floor_id else None
+        out.append(
+            {
+                "area_id": a.id,
+                "name": a.name,
+                "floor_id": a.floor_id,
+                "floor_name": floor.name if floor else None,
+                "floor_level": floor.level if floor and isinstance(floor.level, int) else None,
+            }
+        )
+    return out
 
 
 def _entity_area(ent: er.RegistryEntry | None, dev_reg: dr.DeviceRegistry) -> str | None:

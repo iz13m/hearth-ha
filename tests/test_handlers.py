@@ -37,6 +37,34 @@ async def test_catalog(core: HomeAssistant) -> None:
     assert await d.dispatch("areas.list", {}) == []
 
 
+async def test_areas_carry_their_floor(core: HomeAssistant) -> None:
+    """The layout editor stacks storeys by `level`; a slug alone does not say which is upstairs."""
+    from homeassistant.helpers import area_registry as ar, floor_registry as fr
+
+    floors = fr.async_get(core)
+    ground = floors.async_create("Ground", level=0)
+    upstairs = floors.async_create("Upstairs", level=1)
+    unordered = floors.async_create("Garden room")  # no level set
+    areas = ar.async_get(core)
+    areas.async_create("Kitchen", floor_id=ground.floor_id)
+    areas.async_create("Bedroom", floor_id=upstairs.floor_id)
+    areas.async_create("Studio", floor_id=unordered.floor_id)
+    areas.async_create("Shed")  # on no floor
+
+    d = build_dispatcher(core)
+    by_name = {a["name"]: a for a in await d.dispatch("areas.list", {})}
+
+    assert by_name["Kitchen"]["floor_level"] == 0
+    assert by_name["Kitchen"]["floor_name"] == "Ground"
+    assert by_name["Bedroom"]["floor_level"] == 1
+    # A floor without a level reports none, rather than a guessed one.
+    assert by_name["Studio"]["floor_name"] == "Garden room"
+    assert by_name["Studio"]["floor_level"] is None
+    assert by_name["Shed"]["floor_id"] is None
+    assert by_name["Shed"]["floor_name"] is None
+    assert by_name["Shed"]["floor_level"] is None
+
+
 async def test_automation_crud(core: HomeAssistant, tmp_path: Path) -> None:
     d = build_dispatcher(core)
     assert (await d.dispatch("automations.validate", {"config": AUTOMATION}))["ok"] is True
