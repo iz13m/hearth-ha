@@ -105,11 +105,20 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
     limit = params.get("limit", 200)
     if not isinstance(limit, int) or not 1 <= limit <= 500:
         raise RpcError("invalid_params", "limit must be 1..500")
+    after = params.get("after")
+    if after is not None and (not isinstance(after, str) or len(after) > 255):
+        raise RpcError("invalid_params", "after must be an entity_id")
 
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
     out: list[dict[str, Any]] = []
     for state in sorted(hass.states.async_all(), key=lambda s: s.entity_id):
+        # Keyset paging. Iteration is already sorted by entity_id, so "resume past this id" needs no
+        # offset, no snapshot and no cursor state: a home that gains or loses an entity between pages
+        # cannot make the caller skip or repeat one of the others. A page shorter than `limit` is the
+        # last page, so the result shape stays as it was.
+        if after is not None and state.entity_id <= after:
+            continue
         if state.domain in HIDDEN_DOMAINS:
             continue
         if domain and state.domain != domain:

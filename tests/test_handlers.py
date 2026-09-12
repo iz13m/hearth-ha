@@ -129,3 +129,40 @@ async def test_assist_exposure_is_honoured(core: HomeAssistant) -> None:
     assert ei.value.code == "not_found"
     async_expose_entity(core, "conversation", "input_boolean.test", True)
     assert (await d.dispatch("states.get", {"entity_id": "input_boolean.test"}))["state"] == "off"
+
+
+async def test_entities_list_pages_by_keyset(core: HomeAssistant) -> None:
+    """#12: the 500 cap used to be the end of the list, with no way to read past it."""
+    d = build_dispatcher(core)
+    # Lights are exposed to Assist by default, so plain states are enough; no registry entry needed.
+    for name in ("delta", "alpha", "charlie", "bravo", "echo"):
+        core.states.async_set(f"light.{name}", "off")
+    await core.async_block_till_done()
+
+    all_ids = [e["entity_id"] for e in await d.dispatch("entities.list", {"domain": "light"})]
+    assert all_ids == sorted(all_ids)
+    assert len(all_ids) == 5
+
+    # Walk it two at a time, the way the hub does: a short page is the last one.
+    seen: list[str] = []
+    after: str | None = None
+    for _ in range(10):
+        params: dict[str, object] = {"domain": "light", "limit": 2}
+        if after is not None:
+            params["after"] = after
+        page = await d.dispatch("entities.list", params)
+        seen.extend(e["entity_id"] for e in page)
+        if len(page) < 2:
+            break
+        after = page[-1]["entity_id"]
+
+    # Every entity exactly once, in order, and no page repeated the cursor's own row.
+    assert seen == all_ids
+
+    # A cursor past the end is empty, not an error, and one before the start changes nothing.
+    assert await d.dispatch("entities.list", {"domain": "light", "after": "zzz.zzz"}) == []
+    assert [e["entity_id"] for e in await d.dispatch("entities.list", {"domain": "light", "after": "aaa.aaa"})] == all_ids
+
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("entities.list", {"after": 7})
+    assert ei.value.code == "invalid_params"
