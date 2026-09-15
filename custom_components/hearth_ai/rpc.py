@@ -21,6 +21,10 @@ _LOGGER = logging.getLogger(__name__)
 ALLOWED_METHODS: frozenset[str] = frozenset(
     {
         "areas.list",
+        "floors.list",
+        "areas.create",
+        "areas.set_floor",
+        "floors.create",
         "entities.list",
         "states.get",
         "services.list",
@@ -133,10 +137,11 @@ class Dispatcher:
 
 def build_dispatcher(hass: HomeAssistant, capabilities: frozenset[str] | None = None) -> Dispatcher:
     """Create the dispatcher with every handler registered (gating happens at dispatch)."""
-    from .handlers import automations, control, integrations, registry, scenes, scripts  # noqa: PLC0415
+    from .handlers import areas, automations, control, integrations, registry, scenes, scripts  # noqa: PLC0415
 
     d = Dispatcher(hass, capabilities)
     registry.register(d)
+    areas.register(d)
     control.register(d)
     integrations.register(d)
     automations.register(d)

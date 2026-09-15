@@ -51,12 +51,14 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
         "cap_devices_control",
         "cap_routines_run",
         "cap_integrations_manage",
+        "cap_areas_manage",
     }
     # Operating the home is off until the owner opts in; everything else defaults on.
     defaults = {str(k): k.default() for k in result["data_schema"].schema}
     assert defaults["cap_devices_control"] is False
     assert defaults["cap_routines_run"] is False
     assert defaults["cap_integrations_manage"] is False
+    assert defaults["cap_areas_manage"] is False
     assert defaults["cap_entities_read"] is True
     # Pushing state grants no access polling did not already have, so it is on like the other reads.
     assert defaults["cap_entities_subscribe"] is True

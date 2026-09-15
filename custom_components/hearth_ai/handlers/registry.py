@@ -114,19 +114,19 @@ async def areas_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[s
     """
     reg = ar.async_get(hass)
     floors = fr.async_get(hass)
-    out: list[dict[str, Any]] = []
-    for a in sorted(reg.async_list_areas(), key=lambda a: a.name.lower()):
-        floor = floors.async_get_floor(a.floor_id) if a.floor_id else None
-        out.append(
-            {
-                "area_id": a.id,
-                "name": a.name,
-                "floor_id": a.floor_id,
-                "floor_name": floor.name if floor else None,
-                "floor_level": floor.level if floor and isinstance(floor.level, int) else None,
-            }
-        )
-    return out
+    return [area_dto(a, floors) for a in sorted(reg.async_list_areas(), key=lambda a: a.name.lower())]
+
+
+def area_dto(area: Any, floors: fr.FloorRegistry) -> dict[str, Any]:
+    """One area in the shape `Area` describes, shared by listing and the structure writes."""
+    floor = floors.async_get_floor(area.floor_id) if area.floor_id else None
+    return {
+        "area_id": area.id,
+        "name": area.name,
+        "floor_id": area.floor_id,
+        "floor_name": floor.name if floor else None,
+        "floor_level": floor.level if floor and isinstance(floor.level, int) else None,
+    }
 
 
 def _entity_area(ent: er.RegistryEntry | None, dev_reg: dr.DeviceRegistry) -> str | None:

@@ -50,6 +50,9 @@ def test_control_is_limited_to_opt_in_methods() -> None:
         "integrations.flow_start",
         "integrations.flow_step",
         "integrations.flow_abort",
+        "areas.create",
+        "areas.set_floor",
+        "floors.create",
     }
     for m in ALLOWED_METHODS:
         for banned in ("lock", "camera", "alarm", "shell", "restart"):
