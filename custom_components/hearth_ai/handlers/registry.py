@@ -135,6 +135,12 @@ def _entity_area(ent: er.RegistryEntry | None, dev_reg: dr.DeviceRegistry) -> st
     if ent.area_id:
         return ent.area_id
     if ent.device_id and (dev := dev_reg.async_get(ent.device_id)):
+        if dev.area_id is None and isinstance(dev, dr.ChildDeviceEntry):
+            # A child device with no area of its own inherits its parent's, as Home Assistant's own
+            # `async_get_effective_area_id` does. Reading `dev.area_id` alone reported such an entity
+            # in no room while Home Assistant had it in one — a gap moving devices would expose.
+            parent = dev_reg.async_get(dev.parent_device_id, include_child_devices=False)
+            return parent.area_id if parent else None
         return dev.area_id
     return None
 
