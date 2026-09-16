@@ -34,6 +34,8 @@ ALLOWED_METHODS: frozenset[str] = frozenset(
         "entities.expose",
         "access.list",
         "access.operate",
+        "vision.list",
+        "vision.snapshot",
         "entities.list",
         "states.get",
         "services.list",
@@ -146,11 +148,12 @@ class Dispatcher:
 
 def build_dispatcher(hass: HomeAssistant, capabilities: frozenset[str] | None = None) -> Dispatcher:
     """Create the dispatcher with every handler registered (gating happens at dispatch)."""
-    from .handlers import access, areas, automations, control, exposure, integrations, registry, scenes, scripts  # noqa: PLC0415
+    from .handlers import access, areas, automations, control, exposure, integrations, registry, scenes, scripts, vision  # noqa: PLC0415
 
     d = Dispatcher(hass, capabilities)
     registry.register(d)
     access.register(d)
+    vision.register(d)
     areas.register(d)
     exposure.register(d)
     control.register(d)

@@ -55,7 +55,8 @@
           "cap_integrations_manage": "Add and set up new integrations (devices, services)",
           "cap_areas_manage": "Arrange rooms and floors, and which room each device is in",
           "cap_entities_manage": "Choose which devices Hearth can see",
-          "cap_access_control": "Lock and unlock your doors from the Hearth app"
+          "cap_access_control": "Lock and unlock your doors from the Hearth app",
+          "cap_vision_view": "See your cameras from the Hearth app"
         },
         "data_description": {
           "cap_entities_subscribe": "Sends the state of entities you already exposed as soon as they change, so a light switched at the wall shows up in the app in about a second instead of up to five. It reveals nothing new — those same states were already being read every few seconds.",
@@ -64,7 +65,8 @@
           "cap_integrations_manage": "Lets it search integrations and walk through setup, filling things like IP addresses. It will never send a password, API key, or token: those steps are handed back for you to finish in Home Assistant.",
           "cap_areas_manage": "Lets the Hearth app create, rename and delete areas and floors here, change which floor an area is on, and put a device in an area — for its admins only, never for the AI. Deleting an area works as it does in Home Assistant: whatever was in it is left in no area, and automations or dashboards that named it will need updating.",
           "cap_entities_manage": "Lets the Hearth app share a device with Assist, or stop sharing it, so a newly added device can be used without coming back here. It can only offer devices Hearth is allowed to work with: locks, cameras, alarms and location entities are never listed and can never be shared. Sharing a device makes it visible to everything Hearth can do, including the assistant.",
-          "cap_access_control": "Lets the Hearth app work a lock — and only the app. The AI never sees this: locks stay refused for your own AI client and the Managed assistant, and a lock written into an automation, scene or script is still rejected. Separate from device control on purpose, so turning on “act on my home” never quietly meant “open my front door”. If a lock asks for a code, set a default code on it in Home Assistant — Hearth never carries one."
+          "cap_access_control": "Lets the Hearth app work a lock — and only the app. The AI never sees this: locks stay refused for your own AI client and the Managed assistant, and a lock written into an automation, scene or script is still rejected. Separate from device control on purpose, so turning on “act on my home” never quietly meant “open my front door”. If a lock asks for a code, set a default code on it in Home Assistant — Hearth never carries one.",
+          "cap_vision_view": "Lets the Hearth app show a still picture from a camera — and only the app, only to people you have given that camera in the app. The AI never sees this: cameras stay hidden from your own AI client and the Managed assistant, and a camera written into an automation, scene or script is still rejected. Pictures are made small and sent without the camera's hidden details, such as where it is, and never as live video."
         }
       },
       "assistant": {
