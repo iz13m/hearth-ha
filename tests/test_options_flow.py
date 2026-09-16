@@ -41,6 +41,7 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
     assert keys == {
         "cap_entities_read",
         "cap_entities_subscribe",
+        "cap_entities_manage",
         "cap_services_read",
         "cap_automations_read",
         "cap_automations_write",

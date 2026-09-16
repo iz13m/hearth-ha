@@ -53,6 +53,8 @@ def test_control_is_limited_to_opt_in_methods() -> None:
         "areas.create",
         "areas.set_floor",
         "floors.create",
+        "entities.exposable",
+        "entities.expose",
     }
     for m in ALLOWED_METHODS:
         for banned in ("lock", "camera", "alarm", "shell", "restart"):
