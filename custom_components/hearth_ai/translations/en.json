@@ -54,7 +54,8 @@
           "cap_routines_run": "Activate scenes and run scripts you already created",
           "cap_integrations_manage": "Add and set up new integrations (devices, services)",
           "cap_areas_manage": "Add rooms and floors, and move a room to another floor",
-          "cap_entities_manage": "Choose which devices Hearth can see"
+          "cap_entities_manage": "Choose which devices Hearth can see",
+          "cap_access_control": "Lock and unlock your doors from the Hearth app"
         },
         "data_description": {
           "cap_entities_subscribe": "Sends the state of entities you already exposed as soon as they change, so a light switched at the wall shows up in the app in about a second instead of up to five. It reveals nothing new — those same states were already being read every few seconds.",
@@ -62,7 +63,8 @@
           "cap_routines_run": "A script does whatever you wrote in it, which may include actions Hearth itself is not allowed to perform. Enable this only if you trust your own scripts. Hearth will only activate a scene or run a script you have exposed to Assist (Settings > Voice assistants > Expose) — scripts are not exposed by default — and it refuses any scene that sets a lock, alarm, or camera.",
           "cap_integrations_manage": "Lets it search integrations and walk through setup, filling things like IP addresses. It will never send a password, API key, or token: those steps are handed back for you to finish in Home Assistant.",
           "cap_areas_manage": "Lets the Hearth app create areas and floors here and change which floor an area is on, from Arrange your home. It never deletes or renames anything you made, and it does not move devices between rooms.",
-          "cap_entities_manage": "Lets the Hearth app share a device with Assist, or stop sharing it, so a newly added device can be used without coming back here. It can only offer devices Hearth is allowed to work with: locks, cameras, alarms and location entities are never listed and can never be shared. Sharing a device makes it visible to everything Hearth can do, including the assistant."
+          "cap_entities_manage": "Lets the Hearth app share a device with Assist, or stop sharing it, so a newly added device can be used without coming back here. It can only offer devices Hearth is allowed to work with: locks, cameras, alarms and location entities are never listed and can never be shared. Sharing a device makes it visible to everything Hearth can do, including the assistant.",
+          "cap_access_control": "Lets the Hearth app work a lock — and only the app. The AI never sees this: locks stay refused for your own AI client and the Managed assistant, and a lock written into an automation, scene or script is still rejected. Separate from device control on purpose, so turning on “act on my home” never quietly meant “open my front door”. If a lock asks for a code, set a default code on it in Home Assistant — Hearth never carries one."
         }
       },
       "assistant": {

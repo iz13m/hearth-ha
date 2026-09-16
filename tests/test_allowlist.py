@@ -55,8 +55,17 @@ def test_control_is_limited_to_opt_in_methods() -> None:
         "floors.create",
         "entities.exposable",
         "entities.expose",
+        "access.list",
+        "access.operate",
     }
+    # Methods that deliberately reach a sensitive domain. The list is the point of the check, not a
+    # hole in it: the guard catches a method that *accidentally* names one, so a deliberate one has
+    # to be written here, which forces the decision rather than letting it slip in. Both have a
+    # record (AgDR-0025) and both are app-only on the hub side.
+    reviewed = {"access.list", "access.operate"}
     for m in ALLOWED_METHODS:
+        if m in reviewed:
+            continue
         for banned in ("lock", "camera", "alarm", "shell", "restart"):
             assert banned not in m, m
         if m not in control:
