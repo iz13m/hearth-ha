@@ -90,9 +90,23 @@ def entity_dto(state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegi
         "area_id": area_id,
         "device_id": ent.device_id if ent else None,
         "device_name": _device_name(ent, dev_reg),
+        # Home Assistant's own mark for what an entity *is* to its device: `config` for a setting
+        # (a sensitivity, an indicator LED), `diagnostic` for a reading about the device itself (a
+        # battery, a signal strength), None for the thing the device exists to do. The app folds the
+        # first two into their device instead of drawing each as a tile of its own (AgDR-0033).
+        "entity_category": _category(ent),
         "state": state.state,
         "attributes": filter_attributes(dict(state.attributes)),
     }
+
+
+def _category(ent: Any) -> str | None:
+    """`config`, `diagnostic` or None, whatever shape the registry holds it in."""
+    cat = getattr(ent, "entity_category", None) if ent is not None else None
+    if cat is None:
+        return None
+    value = getattr(cat, "value", cat)
+    return value if value in ("config", "diagnostic") else None
 
 
 def visible(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:

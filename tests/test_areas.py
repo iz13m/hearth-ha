@@ -291,3 +291,27 @@ async def test_an_entity_on_a_child_device_is_listed_in_its_parents_area(core: H
     listed = {e["entity_id"]: e["area_id"] for e in await d.dispatch("entities.list", {"limit": 500})}
     assert listed[ent.entity_id] == garage.id
     assert er.async_get_effective_area_id(core, ent) == garage.id
+
+
+
+async def test_entities_carry_home_assistants_own_category(core: HomeAssistant) -> None:
+    """Settings and diagnostics are marked, so the app can fold them into their device (AgDR-0033)."""
+    from homeassistant.const import EntityCategory
+
+    d = build_dispatcher(core)
+    ents = er.async_get(core)
+    rows = {
+        "binary_sensor.presence": None,
+        "number.sensitivity": EntityCategory.CONFIG,
+        "sensor.battery": EntityCategory.DIAGNOSTIC,
+    }
+    for entity_id, category in rows.items():
+        domain, object_id = entity_id.split(".")
+        entry = ents.async_get_or_create(domain, "test", object_id, suggested_object_id=object_id, entity_category=category)
+        core.states.async_set(entry.entity_id, "1")
+        async_expose_entity(core, "conversation", entry.entity_id, True)
+
+    listed = {e["entity_id"]: e["entity_category"] for e in await d.dispatch("entities.list", {"limit": 500})}
+    assert listed["binary_sensor.presence"] is None
+    assert listed["number.sensitivity"] == "config"
+    assert listed["sensor.battery"] == "diagnostic"
