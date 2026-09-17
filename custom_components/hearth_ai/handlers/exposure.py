@@ -35,20 +35,13 @@ from homeassistant.components.homeassistant.exposed_entities import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from ..policy import DENIED_ENTITY_DOMAINS
 from ..rpc import Dispatcher, RpcError
-from .registry import ASSISTANT, HIDDEN_DOMAINS, _category, _device_name, _entity_area
+# `OFF_LIMITS` is shared with the history handler; it lives next to the domain lists it is built
+# from. Consulted here only when *adding*. See rule 3 in the module docstring.
+from .registry import ASSISTANT, OFF_LIMITS, _category, _device_name, _entity_area
 
 MAX_IDS = 100
 DEFAULT_LIMIT = 500
-
-# Never shareable. The union of two lists that are nearly but not quite the same: `HIDDEN_DOMAINS` is
-# what the read path hides and has `image`; `DENIED_ENTITY_DOMAINS` is what the action policy refuses
-# and has `alarm_control_panel`, which `HIDDEN_DOMAINS` does not. Using only the first would let an
-# admin share an alarm panel and read whether the house is armed.
-#
-# Consulted only when *adding*. See rule 3 in the module docstring.
-OFF_LIMITS: frozenset[str] = HIDDEN_DOMAINS | DENIED_ENTITY_DOMAINS
 
 # The hub validates this too; repeated here because both sides enforce, always (invariant 1).
 ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")

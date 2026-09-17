@@ -32,6 +32,7 @@ PUSH_TIMEOUT_S = 10
 CAPABILITIES: tuple[str, ...] = (
     "entities.read",
     "entities.subscribe",
+    "entities.history",
     "services.read",
     "automations.read",
     "automations.write",
@@ -48,8 +49,11 @@ CAPABILITIES: tuple[str, ...] = (
     "vision.view",
     "conversation",
 )
-# Capabilities that operate the home; off until the owner switches them on.
-OPT_IN_CAPABILITIES: frozenset[str] = frozenset({"devices.control", "routines.run", "integrations.manage", "areas.manage", "entities.manage", "access.control", "vision.view"})
+# Capabilities that wait for the owner's yes. Most of them operate the home; `entities.history` is
+# only a read, and is here because a month of readings shows when the house is empty (AgDR-0036).
+OPT_IN_CAPABILITIES: frozenset[str] = frozenset(
+    {"devices.control", "routines.run", "integrations.manage", "areas.manage", "entities.manage", "access.control", "vision.view", "entities.history"}
+)
 # Capabilities the user toggles in the options UI (`conversation` is derived from the assistant mode).
 TOGGLEABLE_CAPABILITIES: tuple[str, ...] = tuple(c for c in CAPABILITIES if c != "conversation")
 CAPABILITY_FOR_METHOD: dict[str, str] = {
@@ -71,6 +75,7 @@ CAPABILITY_FOR_METHOD: dict[str, str] = {
     "areas.assign": "areas.manage",
     "entities.list": "entities.read",
     "states.get": "entities.read",
+    "states.history": "entities.history",
     "services.list": "services.read",
     "automations.list": "automations.read",
     "automations.get": "automations.read",

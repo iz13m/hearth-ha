@@ -39,10 +39,11 @@
       },
       "capabilities": {
         "title": "What the AI may access",
-        "description": "Each switch grants the AI (your own AI client through the Hearth connector, and the Managed assistant) one area. Reads never change anything. Writes create, edit, and delete items the same way the Home Assistant editor does. The last two let it act on your home immediately and are off until you turn them on. On top of all of this, only entities exposed to Assist (Settings → Voice assistants → Expose) are ever visible, and locks, alarms, cameras, and location entities are never accessible.",
+        "description": "Each switch grants the AI (your own AI client through the Hearth connector, and the Managed assistant) one area. Reads never change anything. Writes create, edit, and delete items the same way the Home Assistant editor does. Some of these let it act on your home immediately, or read more than a current state does; those are off until you turn them on. On top of all of this, only entities exposed to Assist (Settings → Voice assistants → Expose) are ever visible, and locks, alarms, cameras, and location entities are never accessible.",
         "data": {
           "cap_entities_read": "Read entities, states, and areas",
           "cap_entities_subscribe": "Push device state as it changes (instead of waiting to be asked)",
+          "cap_entities_history": "Read what your devices have been recording (history and statistics)",
           "cap_services_read": "Read the service catalog (for authoring actions)",
           "cap_automations_read": "Read automations",
           "cap_automations_write": "Create, edit, and delete automations",
@@ -60,6 +61,7 @@
         },
         "data_description": {
           "cap_entities_subscribe": "Sends the state of entities you already exposed as soon as they change, so a light switched at the wall shows up in the app in about a second instead of up to five. It reveals nothing new — those same states were already being read every few seconds.",
+          "cap_entities_history": "Lets it look up what one entity has been reading in the past — the individual readings your recorder still holds, usually the last ten days or so, and the hourly and daily minimum, maximum and average Home Assistant keeps for much longer — so it can write an automation around what actually happens here instead of guessing. One entity at a time, only entities you have exposed to Assist, never a lock, alarm, camera or location entity, and never their attributes. It is a separate switch because history says more than a current reading does: a month of it shows when the house is usually empty and when people are up.",
           "cap_devices_control": "Lets it act on your home as you speak, for example \"turn on the kitchen lights\". Locks, alarms, and cameras stay blocked.",
           "cap_routines_run": "A script does whatever you wrote in it, which may include actions Hearth itself is not allowed to perform. Enable this only if you trust your own scripts. Hearth will only activate a scene or run a script you have exposed to Assist (Settings > Voice assistants > Expose) — scripts are not exposed by default — and it refuses any scene that sets a lock, alarm, or camera.",
           "cap_integrations_manage": "Lets it search integrations and walk through setup, filling things like IP addresses. It will never send a password, API key, or token: those steps are handed back for you to finish in Home Assistant.",

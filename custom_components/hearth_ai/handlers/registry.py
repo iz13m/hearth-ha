@@ -15,6 +15,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers.service import async_get_all_descriptions
 
 from ..labels import hearth_labels
+from ..policy import DENIED_ENTITY_DOMAINS
 from ..rpc import Dispatcher, RpcError
 from .common import plain, require_str
 
@@ -35,6 +36,17 @@ ATTRIBUTE_DENYLIST: frozenset[str] = frozenset(
 )
 # Domains whose state/attributes are never exposed, even read-only.
 HIDDEN_DOMAINS: frozenset[str] = frozenset({"camera", "device_tracker", "person", "image", "lock"})
+
+# Never shareable, and never readable in any form that shows a pattern over time. The union of two
+# lists that are nearly but not quite the same: `HIDDEN_DOMAINS` is what the read path hides and has
+# `image`; `DENIED_ENTITY_DOMAINS` is what the action policy refuses and has `alarm_control_panel`,
+# which `HIDDEN_DOMAINS` does not. Using only the first would let an admin share an alarm panel and
+# read whether the house is armed — or, through `states.history`, when it was armed and when it was
+# not, which is the same disclosure with dates on it.
+#
+# Lives here rather than in `exposure.py`, where it started, because two handlers now depend on it
+# meaning exactly the same thing (AgDR-0036).
+OFF_LIMITS: frozenset[str] = HIDDEN_DOMAINS | DENIED_ENTITY_DOMAINS
 
 MAX_ATTR_STR = 500
 # The AI only sees what the user exposed to Assist (Settings > Voice assistants > Expose).

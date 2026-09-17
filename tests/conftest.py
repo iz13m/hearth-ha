@@ -12,8 +12,13 @@ from homeassistant.setup import async_setup_component
 
 
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations):  # noqa: PT004
-    """Enable loading custom_components in tests."""
+def auto_enable_custom_integrations(recorder_db_url, enable_custom_integrations):  # noqa: PT004
+    """Enable loading custom_components in tests.
+
+    `recorder_db_url` is named first and otherwise unused: it asserts that `hass` has not been built
+    yet, and this fixture is autouse, so without it every test would set `hass` up before any test
+    could ask for a recorder. With the default in-memory sqlite it does nothing else at all.
+    """
     yield
 
 

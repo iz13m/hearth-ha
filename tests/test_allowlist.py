@@ -38,9 +38,14 @@ def test_attribute_denylist_matches_shared() -> None:
 
 
 def test_control_is_limited_to_opt_in_methods() -> None:
-    """Operating the home is possible, but only through these opt-in methods."""
+    """Every method behind an opt-in switch, named here so adding one is a decision.
+
+    All of them operate the home except `states.history`, which only reads — it is opt-in because a
+    month of readings shows when the house is empty, not because it changes anything (AgDR-0036).
+    """
     control = {m for m in ALLOWED_METHODS if CAPABILITY_FOR_METHOD[m] in OPT_IN_CAPABILITIES}
     assert control == {
+        "states.history",
         "devices.call",
         "scenes.activate",
         "scripts.run",
