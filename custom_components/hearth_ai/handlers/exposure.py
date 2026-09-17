@@ -37,7 +37,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from ..policy import DENIED_ENTITY_DOMAINS
 from ..rpc import Dispatcher, RpcError
-from .registry import ASSISTANT, HIDDEN_DOMAINS, _device_name, _entity_area
+from .registry import ASSISTANT, HIDDEN_DOMAINS, _category, _device_name, _entity_area
 
 MAX_IDS = 100
 DEFAULT_LIMIT = 500
@@ -124,6 +124,9 @@ async def entities_exposable(hass: HomeAssistant, params: dict[str, Any]) -> lis
     after = _str_param(params, "after")
     domain = _str_param(params, "domain")
     query = (_str_param(params, "query") or "").strip().lower()
+    # One physical device's entities, for the note on its screen (AgDR-0035). Checked against the
+    # registry entry, so an entity with no entry is never on any device.
+    device_id = _str_param(params, "device_id")
 
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
@@ -145,6 +148,8 @@ async def entities_exposable(hass: HomeAssistant, params: dict[str, Any]) -> lis
         if query and query not in entity_id.lower() and query not in (state.name or "").lower():
             continue
         ent = ent_reg.async_get(entity_id)
+        if device_id is not None and (ent is None or ent.device_id != device_id):
+            continue
         rows.append(
             {
                 "entity_id": entity_id,
@@ -155,6 +160,10 @@ async def entities_exposable(hass: HomeAssistant, params: dict[str, Any]) -> lis
                 "exposed": exposed,
                 # False means "can be taken away but never given back" — the app draws it as one-way.
                 "can_share": shareable,
+                # Registry metadata, not state: which device, and what Home Assistant calls it there.
+                # Lets the hub notice a sensor whose settings are shared and whose reading is not.
+                "device_id": ent.device_id if ent else None,
+                "entity_category": _category(ent),
             }
         )
         if len(rows) >= limit:

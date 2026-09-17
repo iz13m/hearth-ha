@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity, async_should_expose
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.const import EntityCategory
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.hearth_ai.rpc import build_dispatcher
 
@@ -26,7 +28,7 @@ async def test_lists_candidates_with_no_state_or_attributes(core: HomeAssistant)
     rows = await build_dispatcher(core).dispatch("entities.exposable", {})
     row = next(r for r in rows if r["entity_id"] == "light.hallway")
     # Enough to recognise a device and choose. Nothing you could read a house from.
-    assert set(row) == {"entity_id", "name", "domain", "area_id", "device_name", "exposed", "can_share"}
+    assert set(row) == {"entity_id", "name", "domain", "area_id", "device_name", "exposed", "can_share", "device_id", "entity_category"}
     assert "state" not in row and "attributes" not in row
 
 
@@ -205,3 +207,26 @@ async def test_exposure_is_what_the_rest_of_the_surface_filters_on(core: HomeAss
 
     await d.dispatch("entities.expose", {"entity_ids": [light], "expose": True})
     assert light in {e["entity_id"] for e in await d.dispatch("entities.list", {})}
+
+
+async def test_says_which_device_and_what_it_is_there_and_filters_by_device(core: HomeAssistant) -> None:
+    """AgDR-0035: enough to notice a sensor whose settings are shared and whose reading is not."""
+    entry = MockConfigEntry(domain="test")
+    entry.add_to_hass(core)
+    devices = dr.async_get(core)
+    sensor = devices.async_get_or_create(config_entry_id=entry.entry_id, identifiers={("test", "presence")}, name="Presence Sensor")
+    other = devices.async_get_or_create(config_entry_id=entry.entry_id, identifiers={("test", "plug")}, name="Plug")
+    reading = _register(core, "binary_sensor", "presence", device_id=sensor.id, config_entry=entry)
+    setting = _register(core, "number", "fading_time", device_id=sensor.id, config_entry=entry, entity_category=EntityCategory.CONFIG)
+    _register(core, "switch", "plug", device_id=other.id, config_entry=entry)
+    loose = _register(core, "light", "loose")
+
+    d = build_dispatcher(core)
+    rows = {r["entity_id"]: r for r in await d.dispatch("entities.exposable", {})}
+    assert (rows[reading]["device_id"], rows[reading]["entity_category"]) == (sensor.id, None)
+    assert (rows[setting]["device_id"], rows[setting]["entity_category"]) == (sensor.id, "config")
+    assert (rows[loose]["device_id"], rows[loose]["entity_category"]) == (None, None)
+    assert "state" not in rows[reading] and "attributes" not in rows[reading]
+
+    only = await d.dispatch("entities.exposable", {"device_id": sensor.id})
+    assert sorted(r["entity_id"] for r in only) == sorted([reading, setting])
