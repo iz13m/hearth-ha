@@ -32,7 +32,7 @@
       },
       "connection": {
         "title": "Connection to Hearth",
-        "description": "Installation {installation_id} at {hub_url} is currently {status}. Turning the connection off closes the outbound link immediately; nothing can reach this Home Assistant until you turn it back on. The connection switch entity does the same.",
+        "description": "Installation {installation_id} at {hub_url} is currently {status}. Turning the connection off closes the outbound link immediately; nothing can reach this Home Assistant until you turn it back on. The connection switch entity does the same. Hearth also adds five labels to Home Assistant (Hearth: tile, read only, setting, diagnostic, hide). Put them on an entity or device to choose how the Hearth app shows it; they change nothing for an AI, which still sees exactly what is exposed to Assist.",
         "data": {
           "connection_enabled": "Connect to Hearth"
         }

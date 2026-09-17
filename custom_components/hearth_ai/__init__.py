@@ -12,6 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .client import HearthClient
 from .const import CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN
+from .labels import async_ensure_labels
 from .options import HearthOptions
 from .rpc import build_dispatcher
 
@@ -35,6 +36,8 @@ def device_info(entry: ConfigEntry) -> dr.DeviceInfo:
 
 async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bool:
     """Set up from a config entry (re-run on every options change via OptionsFlowWithReload)."""
+    # Before the client: the first `entities.list` after connecting should already know the labels.
+    await async_ensure_labels(hass)
     options = HearthOptions.from_entry(entry)
     capabilities = options.capabilities
     dispatcher = build_dispatcher(hass, frozenset(capabilities))

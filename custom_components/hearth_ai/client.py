@@ -35,6 +35,7 @@ from .const import (
     RECONNECT_MIN_S,
 )
 from .rpc import Dispatcher, RpcError
+from .labels import RegistryWatcher
 from .subscriber import StateSubscriber
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,6 +66,9 @@ class HearthClient:
         self._subscriber: StateSubscriber | None = (
             StateSubscriber(hass, self._push_states) if "entities.subscribe" in self.capabilities else None
         )
+        # Tells the hub when an owner changes a Hearth label (AgDR-0034). Not capability-gated: it
+        # carries nothing, and the hub can only re-read what the owner already lets it read.
+        self._watcher = RegistryWatcher(hass, self._registry_changed)
         self._pending: dict[str, asyncio.Future[Any]] = {}
         self._stopping = False
         self.connected = False
@@ -149,6 +153,7 @@ class HearthClient:
                     hello_task.cancel()
                 if self._subscriber is not None:
                     self._subscriber.stop()
+                self._watcher.stop()
                 self._ws = None
                 self._fail_pending("connection closed")
                 for t in list(self.inflight):
@@ -172,6 +177,7 @@ class HearthClient:
             # After hello, never before: the hub rejects anything else until the handshake is done.
             if self._subscriber is not None:
                 self._subscriber.start()
+            self._watcher.start()
             _LOGGER.info("connected to Hearth hub as installation %s", self.installation_id)
         except RpcError as err:
             self.last_error = f"hello failed: {err.message}"
@@ -254,6 +260,14 @@ class HearthClient:
         if ws is None or ws.closed:
             return
         await self.async_call("entities.changed", {"entities": entities}, timeout=PUSH_TIMEOUT_S)
+
+    async def _registry_changed(self) -> None:
+        """Best effort, like a state push. An older hub answers `method_not_allowed`, and the caller
+        swallows it: the app's poll still catches up, just not within a second or two."""
+        ws = self._ws
+        if ws is None or ws.closed:
+            return
+        await self.async_call("registry.changed", {}, timeout=PUSH_TIMEOUT_S)
 
     def _resolve(self, frame: dict[str, Any]) -> None:
         fut = self._pending.get(str(frame.get("id", "")))

@@ -14,6 +14,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.service import async_get_all_descriptions
 
+from ..labels import hearth_labels
 from ..rpc import Dispatcher, RpcError
 from .common import plain, require_str
 
@@ -77,7 +78,7 @@ def _device_name(ent: Any, dev_reg: dr.DeviceRegistry | None) -> str | None:
     return name[:MAX_ATTR_STR]
 
 
-def entity_dto(state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegistry | None) -> dict[str, Any]:
+def entity_dto(hass: HomeAssistant, state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegistry | None) -> dict[str, Any]:
     """One entity in the shape `Entity` describes, so a pushed change and a polled one agree.
 
     Takes the device registry rather than a precomputed name so that both callers — the list
@@ -95,6 +96,9 @@ def entity_dto(state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegi
         # battery, a signal strength), None for the thing the device exists to do. The app folds the
         # first two into their device instead of drawing each as a tile of its own (AgDR-0033).
         "entity_category": _category(ent),
+        # The Hearth labels on this entity and its device, as found. The hub decides what they mean
+        # (AgDR-0034), so a rule change never needs a release of this integration.
+        "hearth_labels": hearth_labels(hass, ent, dev_reg),
         "state": state.state,
         "attributes": filter_attributes(dict(state.attributes)),
     }
@@ -195,7 +199,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         name = state.name
         if query and query not in state.entity_id.lower() and query not in (name or "").lower():
             continue
-        out.append(entity_dto(state, ent, entity_area, dev_reg))
+        out.append(entity_dto(hass, state, ent, entity_area, dev_reg))
         if len(out) >= limit:
             break
     return out

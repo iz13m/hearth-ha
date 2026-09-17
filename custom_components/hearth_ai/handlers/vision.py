@@ -74,6 +74,8 @@ async def vision_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
     """Every camera in the home. Its own method, like `access.list`, so `entities.list` stays blind to them."""
     from homeassistant.helpers import device_registry as dr, entity_registry as er
 
+    from ..labels import hearth_labels  # noqa: PLC0415
+
     limit = params.get("limit", DEFAULT_LIMIT)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
         raise RpcError("invalid_params", "limit must be an integer between 1 and 500")
@@ -98,6 +100,8 @@ async def vision_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
                 "device_name": _device_name(ent, dev_reg),
                 # idle / recording / streaming / unavailable — Home Assistant's own words.
                 "state": state.state,
+                # Only `hide` means anything on a camera; the hub decides (AgDR-0034).
+                "hearth_labels": hearth_labels(hass, ent, dev_reg),
             }
         )
         if len(rows) >= limit:

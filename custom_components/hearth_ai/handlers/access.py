@@ -32,6 +32,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
+from ..labels import hearth_labels
 from .registry import _device_name, _entity_area
 
 DOMAIN = "lock"
@@ -95,6 +96,8 @@ def _dto(hass: HomeAssistant, state: Any, ent: Any, dev_reg: Any) -> dict[str, A
         # `code_format` is a regex when the lock wants a PIN. Hearth never carries one, so this is
         # really "the owner must have set a default code in Home Assistant for this to work".
         "needs_code": state.attributes.get("code_format") is not None,
+        # Only `hide` means anything on a door; the hub decides (AgDR-0034).
+        "hearth_labels": hearth_labels(hass, ent, dev_reg),
     }
 
 

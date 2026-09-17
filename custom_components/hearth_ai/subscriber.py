@@ -82,7 +82,7 @@ class StateSubscriber:
         dev_reg = dr.async_get(self._hass)
         area = _entity_area(ent, dev_reg)
         # Keyed by entity, so a burst on one entity collapses to its latest value.
-        self._pending[entity_id] = entity_dto(state, ent, area, dev_reg)
+        self._pending[entity_id] = entity_dto(self._hass, state, ent, area, dev_reg)
         if self._flush is None:
             self._flush = self._hass.loop.call_later(DEBOUNCE_S, self._drain)
 
