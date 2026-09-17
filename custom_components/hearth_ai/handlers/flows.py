@@ -51,8 +51,9 @@ MAX_TRACKED_FLOWS = 32
 
 # Serialising a flow's form: Home Assistant 2026+ uses probatio, older releases voluptuous-serialize.
 try:  # pragma: no cover - depends on the HA version at runtime
-    from probatio import to_field_list as serialize_schema
+    from probatio import Schema as SchemaType, to_field_list as serialize_schema
 except ImportError:  # pragma: no cover
+    from voluptuous import Schema as SchemaType
     from voluptuous_serialize import convert as serialize_schema
 
 
@@ -104,6 +105,33 @@ def serialize_fields(schema: Any, what: str) -> list[dict[str, Any]]:
     except Exception:  # noqa: BLE001 - a form we cannot describe is still a valid form
         _LOGGER.warning("could not serialise the %s form", what)
         return []
+
+
+def serialize_field_map(fields: Any, what: str) -> list[dict[str, Any]]:
+    """Serialise a plain `{marker: validator}` mapping, one field at a time.
+
+    Home Assistant's storage collections describe their forms as a dict of markers rather than as a
+    built `Schema`, and some of their validators are plain functions the serialiser does not know —
+    `cv.icon` is one. Serialising the mapping in one go means a single unknown validator loses the
+    whole form, so each field is tried on its own and an unserialisable one falls back to its name.
+    A field described only by its name is still a field a caller can fill in; a form of nothing is
+    not.
+    """
+    out: list[dict[str, Any]] = []
+    for marker, validator in fields.items():
+        try:
+            out += [flatten(f) for f in serialize_schema(SchemaType({marker: validator}), custom_serializer=cv.custom_serializer)]
+        except Exception:  # noqa: BLE001 - an undescribable field is still a submittable one
+            name = getattr(marker, "schema", marker)
+            out.append(
+                {
+                    "name": str(name),
+                    "type": "string",
+                    "required": type(marker).__name__ == "Required",
+                    "secret": SECRET_NAME.search(str(name)) is not None,
+                }
+            )
+    return out
 
 
 def remember_fields(hass: HomeAssistant, flow_id: str, fields: list[dict[str, Any]]) -> None:

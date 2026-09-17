@@ -42,6 +42,7 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
         "cap_entities_read",
         "cap_entities_subscribe",
         "cap_entities_history",
+        "cap_helpers_manage",
         "cap_entities_manage",
         "cap_access_control",
         "cap_vision_view",
@@ -68,6 +69,7 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
     assert defaults["cap_entities_subscribe"] is True
     # Reading the past is only a read and still starts off: a month of it is a pattern, not a state.
     assert defaults["cap_entities_history"] is False
+    assert defaults["cap_helpers_manage"] is False
 
     with patch("custom_components.hearth_ai.HearthClient.start") as start:
         result = await hass.config_entries.options.async_configure(
