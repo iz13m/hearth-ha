@@ -6,6 +6,7 @@ denied services into automations/scripts/scenes that HA would then run on its be
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 DENIED_ACTION_DOMAINS: frozenset[str] = frozenset(
@@ -95,6 +96,58 @@ def _entity_ids(target: Any) -> list[str]:
     return []
 
 
+REFERENCEABLE_DENIED_DOMAINS: frozenset[str] = DENIED_ENTITY_DOMAINS | {"image"}
+"""Domains a model may never name anywhere — mirror of REFERENCEABLE_DENIED_DOMAINS in policy.ts.
+
+`DENIED_ENTITY_DOMAINS` plus `image`: the read path hides `image` while the action policy does not,
+and something that merely *reads* an entity is filtered by the read path's union. Keeping the same
+union here makes "never listed, never readable" and "never referenceable" one set; `OFF_LIMITS` in
+`handlers/registry.py` is the other mirror.
+"""
+
+HOST_SERVICE_DOMAINS: frozenset[str] = frozenset({"shell_command", "python_script", "hassio", "backup"})
+"""Service domains that are host-level wherever they appear, including inside a template string."""
+
+_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_/\-])(" + "|".join(sorted(REFERENCEABLE_DENIED_DOMAINS | HOST_SERVICE_DOMAINS)) + r")\.[a-z0-9_]+"
+)
+_TEMPLATE_RE = re.compile(r"\{\{|\{%")
+
+
+def find_reference_violations(value: Any, path: str = "input") -> list[str]:
+    """Every place a value names an entity in a domain the model may never reach (AgDR-0038).
+
+    Mirror of `findReferenceViolations` in policy.ts. `find_policy_violations` only inspects the
+    target of a node that already carries an `action`, which is right for an automation and not
+    enough for a config-flow form: a `trend` helper's whole configuration is
+    `{"entity_id": "lock.front_door"}` and a template sensor's is `{{ states('lock.front_door') }}`.
+
+    Complete for the helpers whose fields are entity pickers and numbers; a **backstop, not a
+    boundary**, for anything Home Assistant renders as a template, since
+    `{{ states('lo' ~ 'ck.front_door') }}` renders the same and no regex will see it.
+    """
+    problems: list[str] = []
+
+    def scan(text: str, p: str) -> None:
+        for m in _REFERENCE_RE.finditer(text):
+            problems.append(f"{p}: {m.group(0)} is in a domain Hearth never lets a model reach")
+
+    def visit(node: Any, p: str) -> None:
+        if isinstance(node, str):
+            scan(node, p)
+        elif isinstance(node, list):
+            for i, n in enumerate(node):
+                visit(n, f"{p}[{i}]")
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                key = str(k)
+                scan(key, f"{p}.{key}")
+                visit(v, f"{p}.{key}")
+
+    visit(value, path)
+    return list(dict.fromkeys(problems))
+
+
 def find_policy_violations(config: Any, path: str = "config") -> list[str]:
     problems: list[str] = []
 
@@ -107,6 +160,10 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
             return
         action = node.get("action", node.get("service"))
         if isinstance(action, str):
+            # A templated action name is refused outright: the service it would call cannot be known
+            # until it runs, and `_domain("{{ 'lock.unlock' }}")` is `{{ 'lock`, which matches nothing.
+            if _TEMPLATE_RE.search(action):
+                problems.append(f"{p}: action {action} is a template; the service it would call cannot be known until it runs")
             dom = _domain(action)
             if dom in DENIED_ACTION_DOMAINS:
                 problems.append(f"{p}: action {action} targets denied domain {dom}")

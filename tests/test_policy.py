@@ -11,7 +11,10 @@ from custom_components.hearth_ai.policy import (
     DENIED_ACTION_DOMAINS,
     DENIED_ACTIONS,
     DENIED_ENTITY_DOMAINS,
+    HOST_SERVICE_DOMAINS,
+    REFERENCEABLE_DENIED_DOMAINS,
     find_policy_violations,
+    find_reference_violations,
     find_scene_policy_violations,
 )
 
@@ -23,6 +26,8 @@ def test_lists_match_shared() -> None:
     assert set(data["denied_action_domains"]) == DENIED_ACTION_DOMAINS
     assert set(data["denied_actions"]) == DENIED_ACTIONS
     assert set(data["denied_entity_domains"]) == DENIED_ENTITY_DOMAINS
+    assert set(data["referenceable_denied_domains"]) == REFERENCEABLE_DENIED_DOMAINS
+    assert set(data["host_service_domains"]) == HOST_SERVICE_DOMAINS
 
 
 def test_nested_denied_actions_found() -> None:
@@ -60,3 +65,27 @@ async def test_handlers_refuse_denied_configs(core, tmp_path) -> None:  # noqa: 
         await d.dispatch("scripts.create", {"config": {"alias": "x", "sequence": [{"action": "shell_command.x"}]}})
     with pytest.raises(RpcError):
         await d.dispatch("scenes.create", {"config": {"name": "x", "entities": {"lock.a": "unlocked"}}})
+
+
+def test_a_reference_is_found_wherever_it_hides() -> None:
+    """Mirror of the policy.test.ts cases; the two implementations must agree exactly (AgDR-0038)."""
+    assert len(find_reference_violations({"entity_id": "lock.front_door"})) == 1
+    assert len(find_reference_violations({"sources": ["sensor.a", "camera.porch"]})) == 1
+    assert len(find_reference_violations({"entities": {"device_tracker.phone": "home"}})) == 1
+    assert len(find_reference_violations({"state": "{{ states('lock.front_door') }}"})) == 1
+    assert len(find_reference_violations({"state": "{{ states.lock.front_door.state }}"})) == 1
+    assert len(find_reference_violations({"turn_on": [{"action": "shell_command.backup_now"}]})) == 1
+    assert len(find_reference_violations({"image": "image.doorbell_last"})) == 1
+
+
+def test_a_reference_scan_leaves_ordinary_configuration_alone() -> None:
+    assert find_reference_violations({"state": "{{ states('sensor.door_lock_battery') }}"}) == []
+    assert find_reference_violations({"path": "/config/www/camera.jpg"}) == []
+    assert find_reference_violations({"entity_id": "binary_sensor.person_detected"}) == []
+    assert find_reference_violations({"state": "{{ states('light.hall') }}"}) == []
+
+
+def test_a_templated_action_name_is_refused() -> None:
+    v = find_policy_violations({"actions": [{"action": "{{ 'lock.unlock' }}"}]})
+    assert any("is a template" in x for x in v)
+    assert find_policy_violations({"actions": [{"action": "light.turn_on"}]}) == []

@@ -11,7 +11,7 @@ from homeassistant.data_entry_flow import FlowResultType
 
 from pytest_homeassistant_custom_component.common import MockModule, mock_config_flow, mock_integration, mock_platform
 
-from custom_components.hearth_ai.handlers.integrations import DENIED_DOMAINS, _is_secret, _serialize_schema
+from custom_components.hearth_ai.handlers.flows import DENIED_DOMAINS, is_secret, serialize_schema
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 CAPS = frozenset({"integrations.manage"})
@@ -91,12 +91,12 @@ async def test_never_relays_a_password(core: HomeAssistant) -> None:
 
 
 def test_secret_detection_covers_selectors_and_names() -> None:
-    assert _is_secret({"name": "host", "type": "string"}) is False
-    assert _is_secret({"name": "password", "type": "string"}) is True          # bare string, older flows
-    assert _is_secret({"name": "api_key", "type": "string"}) is True
-    assert _is_secret({"name": "access_token", "type": "string"}) is True
-    assert _is_secret({"name": "anything", "selector": {"text": {"type": "password"}}}) is True
-    assert _is_secret({"name": "anything", "selector": {"text": {"type": "url"}}}) is False
+    assert is_secret({"name": "host", "type": "string"}) is False
+    assert is_secret({"name": "password", "type": "string"}) is True          # bare string, older flows
+    assert is_secret({"name": "api_key", "type": "string"}) is True
+    assert is_secret({"name": "access_token", "type": "string"}) is True
+    assert is_secret({"name": "anything", "selector": {"text": {"type": "password"}}}) is True
+    assert is_secret({"name": "anything", "selector": {"text": {"type": "url"}}}) is False
 
 
 def test_serialiser_is_available() -> None:
@@ -104,29 +104,107 @@ def test_serialiser_is_available() -> None:
     import probatio as vol
     from homeassistant.helpers import config_validation as cv
 
-    fields = _serialize_schema(vol.Schema({vol.Required("host"): str}), custom_serializer=cv.custom_serializer)
+    fields = serialize_schema(vol.Schema({vol.Required("host"): str}), custom_serializer=cv.custom_serializer)
     assert fields[0]["name"] == "host"
     assert fields[0]["required"] is True
 
 
+async def test_a_form_field_is_policed_like_the_automation_it_can_be(core: HomeAssistant) -> None:
+    """The bypass this whole change exists for (AgDR-0038).
+
+    Home Assistant's `template` helper takes a whole action sequence in a form field and really runs
+    it when the entity is operated. Submitting one was a way to author an action the automation path
+    would have refused — `lock.unlock` on every lock in the house, with no lock id needed — and then
+    fire it with `devices.call` on the resulting `switch.*`.
+    """
+    d = build_dispatcher(core, CAPS)
+    start = await _start_fake_flow(core, d, kind="action")
+    unlock = {"name": "Evil", "turn_on": [{"action": "lock.unlock", "target": {"entity_id": "all"}}]}
+
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("integrations.flow_step", {"flow_id": start["flow_id"], "input": unlock})
+    assert ei.value.code == "validation_failed"
+    assert "lock.unlock" in ei.value.message
+
+    # ...while the same field carrying an allowed action still works, because refusing every action
+    # would cost "a switch that turns on both lamps" and buy nothing a script does not already allow.
+    done = await d.dispatch(
+        "integrations.flow_step",
+        {"flow_id": start["flow_id"], "input": {"name": "Both lamps", "turn_on": [{"action": "light.turn_on", "target": {"entity_id": "light.hall"}}]}},
+    )
+    assert done["type"] == "create_entry"
+
+
+async def test_a_form_field_may_not_name_an_off_limits_entity(core: HomeAssistant) -> None:
+    """A trend helper's whole configuration is an entity_id, and no action is involved at all."""
+    d = build_dispatcher(core, CAPS)
+    start = await _start_fake_flow(core, d, kind="action")
+
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("integrations.flow_step", {"flow_id": start["flow_id"], "input": {"name": "Front door trend", "entity_id": "lock.front_door"}})
+    assert ei.value.code == "validation_failed"
+    assert "lock.front_door" in ei.value.message
+
+    # Nor inside a template, which is how a template sensor would read one.
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("integrations.flow_step", {"flow_id": start["flow_id"], "input": {"name": "Sneaky", "state": "{{ states('camera.porch') }}"}})
+    assert ei.value.code == "validation_failed"
+
+
+async def test_a_password_typed_field_with_an_innocent_name_is_refused(core: HomeAssistant) -> None:
+    """The half of the credential check that was dead code.
+
+    `flow_step` consulted `flow.get("data_schema")`, but an `async_progress()` dict is built from
+    flow_id/handler/context/step_id only — so it was always None, the selector arm never ran, and a
+    password-typed field called `pw` was relayed. The fields we served are remembered instead.
+    """
+    d = build_dispatcher(core, CAPS)
+    start = await _start_fake_flow(core, d, kind="innocent")
+    assert start["secret_fields"] == ["pw"]
+
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("integrations.flow_step", {"flow_id": start["flow_id"], "input": {"pw": "hunter2"}})
+    assert ei.value.code == "method_not_allowed"
+    assert "pw" in ei.value.message
+
+
+async def test_the_remembered_form_is_forgotten_when_the_flow_ends(core: HomeAssistant) -> None:
+    from custom_components.hearth_ai.handlers.flows import DATA_FLOW_FIELDS
+
+    d = build_dispatcher(core, CAPS)
+    start = await _start_fake_flow(core, d)
+    assert core.data[DATA_FLOW_FIELDS][start["flow_id"]]
+    await d.dispatch("integrations.flow_step", {"flow_id": start["flow_id"], "input": {"host": "10.0.0.2"}})
+    assert start["flow_id"] not in core.data[DATA_FLOW_FIELDS]
+
+    aborted = await _start_fake_flow(core, d)
+    assert core.data[DATA_FLOW_FIELDS][aborted["flow_id"]]
+    await d.dispatch("integrations.flow_abort", {"flow_id": aborted["flow_id"]})
+    assert aborted["flow_id"] not in core.data[DATA_FLOW_FIELDS]
+
+
 # --------------------------------------------------------------------------- helpers
-async def _start_fake_flow(core: HomeAssistant, dispatcher: Any, *, secret: bool = False) -> dict[str, Any]:
-    """Register a throwaway config flow so the test does not depend on a real integration."""
+async def _start_fake_flow(core: HomeAssistant, dispatcher: Any, *, secret: bool = False, kind: str = "host") -> dict[str, Any]:
+    """Register a throwaway config flow so the test does not depend on a real integration.
+
+    `kind` picks the shape under test: `host` is an ordinary field, `action` stands in for Home
+    Assistant's `template` helper (a form field that takes a whole action sequence), and `innocent`
+    is a password-*typed* field whose name says nothing — the case the dead `data_schema` check was
+    supposed to catch.
+    """
     import probatio as vol
     from homeassistant import config_entries
-    from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
+    from homeassistant.helpers.selector import ActionSelector, TextSelector, TextSelectorConfig, TextSelectorType
 
-    domain = "demo_secret" if secret else "demo_device"
-    schema = (
-        vol.Schema(
-            {
-                vol.Required("username"): str,
-                vol.Required("password"): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-            }
-        )
-        if secret
-        else vol.Schema({vol.Required("host"): str})
-    )
+    password = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+    if secret:
+        domain, schema = "demo_secret", vol.Schema({vol.Required("username"): str, vol.Required("password"): password})
+    elif kind == "action":
+        domain, schema = "demo_actions", vol.Schema({vol.Required("name"): str, vol.Optional("turn_on"): ActionSelector()})
+    elif kind == "innocent":
+        domain, schema = "demo_innocent", vol.Schema({vol.Required("pw"): password})
+    else:
+        domain, schema = "demo_device", vol.Schema({vol.Required("host"): str})
 
     class FakeFlow(config_entries.ConfigFlow):
         VERSION = 1
