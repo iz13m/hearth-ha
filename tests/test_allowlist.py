@@ -65,6 +65,8 @@ def test_control_is_limited_to_opt_in_methods() -> None:
         "categories.update",
         "categories.delete",
         "categories.assign",
+        "notify.targets",
+        "notify.send",
         "devices.call",
         "scenes.activate",
         "scripts.run",

@@ -44,6 +44,7 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
         "cap_entities_history",
         "cap_helpers_manage",
         "cap_labels_manage",
+        "cap_notify_send",
         "cap_entities_manage",
         "cap_access_control",
         "cap_vision_view",
@@ -72,6 +73,7 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
     assert defaults["cap_entities_history"] is False
     assert defaults["cap_helpers_manage"] is False
     assert defaults["cap_labels_manage"] is False
+    assert defaults["cap_notify_send"] is False
 
     with patch("custom_components.hearth_ai.HearthClient.start") as start:
         result = await hass.config_entries.options.async_configure(
