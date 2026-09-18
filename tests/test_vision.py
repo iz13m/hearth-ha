@@ -7,10 +7,9 @@ is a claim about bytes, and a mocked encoder would prove nothing about it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from io import BytesIO
-
-from dataclasses import dataclass
 
 import pytest
 from PIL import Image as PILImage
@@ -46,14 +45,6 @@ def _jpeg(width: int, height: int, *, gps: bool = False) -> bytes:
     return out.getvalue()
 
 
-@dataclass
-class _Image:
-    """The shape of Home Assistant's `camera.Image`, without importing the camera component."""
-
-    content_type: str
-    content: bytes
-
-
 @pytest.fixture
 def serves(monkeypatch: pytest.MonkeyPatch):
     """Make the camera hand back chosen bytes, and record what it was asked for."""
@@ -64,12 +55,63 @@ def serves(monkeypatch: pytest.MonkeyPatch):
             asked.append({"entity_id": entity_id, "width": width, "height": height})
             if error is not None:
                 raise error
-            return _Image(content_type=content_type, content=content)
+            return content
 
         monkeypatch.setattr(vision, "_get_image", fake)
         return asked
 
     return _serve
+
+
+class _FakeStream:
+    """Home Assistant's `Stream`, as far as a still is concerned.
+
+    `frames` is keyed by `wait_for_next_keyframe`, which is the whole point: a camera with no keyframe
+    already buffered answers `None` to the impatient call and a picture to the patient one.
+    """
+
+    def __init__(self, frames: dict[bool, bytes | None]) -> None:
+        self.frames = frames
+        self.asked: list[dict] = []
+
+    async def async_get_image(self, width=None, height=None, wait_for_next_keyframe=False):  # noqa: ANN001, ANN201
+        self.asked.append({"width": width, "height": height, "wait_for_next_keyframe": wait_for_next_keyframe})
+        return self.frames[wait_for_next_keyframe]
+
+
+class _FakeCamera:
+    """A camera entity, with the two properties a still depends on."""
+
+    def __init__(self, *, still: bytes | None = None, stream: _FakeStream | None = None, use_stream_for_stills: bool = False) -> None:
+        self.still = still
+        self.stream: _FakeStream | None = None
+        self._created = stream
+        self.use_stream_for_stills = use_stream_for_stills
+        self.asked: list[dict] = []
+        self.streams_created = 0
+
+    async def async_camera_image(self, width=None, height=None):  # noqa: ANN001, ANN201
+        self.asked.append({"width": width, "height": height})
+        return self.still
+
+    async def async_create_stream(self):  # noqa: ANN201
+        self.streams_created += 1
+        self.stream = self._created
+        return self._created
+
+
+@pytest.fixture
+def camera_is(monkeypatch: pytest.MonkeyPatch):
+    """Stand in for the camera component, which the test venv cannot import (it needs `turbojpeg`)."""
+
+    def _use(cam: _FakeCamera) -> _FakeCamera:
+        async def fake(hass, entity_id):  # noqa: ANN001, ANN202
+            return cam
+
+        monkeypatch.setattr(vision, "_lookup_camera", fake)
+        return cam
+
+    return _use
 
 
 async def test_the_model_still_cannot_see_a_camera() -> None:
@@ -185,3 +227,99 @@ async def test_cameras_are_off_until_the_owner_turns_them_on(core: HomeAssistant
         with pytest.raises(RpcError) as err:
             await d.dispatch(method, params)
         assert err.value.code == "method_not_allowed"
+
+
+async def test_a_camera_that_makes_stills_from_its_stream_waits_for_the_next_keyframe(core: HomeAssistant, camera_is) -> None:
+    """The front door bug (September 2026): every still failed, for both cameras in the home.
+
+    `camera.async_get_image` asks such a camera with `wait_for_next_keyframe=False`, which answers
+    only when a keyframe is already buffered — so the picture arrived once, ever, and after that the
+    app showed an empty tile. Asking for the next keyframe is what Home Assistant's own snapshot
+    service does, and it is what this fake refuses to answer any other way.
+    """
+    porch = _camera(core, "porch")
+    stream = _FakeStream({False: None, True: _jpeg(1280, 720)})
+    cam = camera_is(_FakeCamera(stream=stream, use_stream_for_stills=True))
+
+    out = await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch, "width": 320})
+
+    assert (out["width"], out["height"]) == (320, 180)
+    # Asked the stream, patiently, and never bothered with a still endpoint it does not have.
+    assert stream.asked == [{"width": 320, "height": 240, "wait_for_next_keyframe": True}]
+    assert cam.asked == [] and cam.streams_created == 1
+
+
+async def test_a_still_endpoint_that_answers_with_nothing_falls_back_to_the_stream(core: HomeAssistant, camera_is) -> None:
+    """Not every camera that behaves this way says so: `use_stream_for_stills` is false and the still is empty."""
+    porch = _camera(core, "porch")
+    stream = _FakeStream({False: None, True: _jpeg(640, 480)})
+    cam = camera_is(_FakeCamera(still=None, stream=stream))
+
+    out = await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+
+    assert (out["width"], out["height"]) == (640, 480)
+    assert cam.asked == [{"width": 640, "height": 480}]  # the direct still was tried first
+    assert stream.asked == [{"width": 640, "height": 480, "wait_for_next_keyframe": True}]
+
+
+async def test_a_camera_with_a_still_of_its_own_is_never_made_to_start_a_stream(core: HomeAssistant, camera_is) -> None:
+    """A stream is a decode worker: never started for a camera that simply hands over a picture."""
+    porch = _camera(core, "porch")
+    cam = camera_is(_FakeCamera(still=_jpeg(800, 600)))
+
+    out = await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+
+    assert (out["width"], out["height"]) == (640, 480)
+    assert cam.streams_created == 0
+
+
+async def test_a_camera_that_never_answers_is_a_wait_that_ran_out_not_a_refusal(
+    core: HomeAssistant, camera_is, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The keyframe wait has no timeout of its own, and `ha_error` would read as "your home said no"."""
+
+    class _Silent(_FakeStream):
+        async def async_get_image(self, width=None, height=None, wait_for_next_keyframe=False):  # noqa: ANN001, ANN201
+            await asyncio.Event().wait()  # a camera that never sends another keyframe
+
+    porch = _camera(core, "porch")
+    camera_is(_FakeCamera(stream=_Silent({}), use_stream_for_stills=True))
+    monkeypatch.setattr(vision, "SNAPSHOT_TIMEOUT_S", 0.05)
+
+    with pytest.raises(RpcError) as err:
+        await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+    assert err.value.code == "timeout"
+
+
+async def test_a_camera_with_no_picture_and_no_stream_says_so(core: HomeAssistant, camera_is) -> None:
+    """`async_create_stream` gives back nothing when there is no stream source, and that is not a crash."""
+    porch = _camera(core, "porch")
+    camera_is(_FakeCamera(still=None, stream=None))
+
+    with pytest.raises(RpcError) as err:
+        await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+    assert err.value.code == "ha_error" and "did not send a picture" in err.value.message
+
+
+async def test_the_camera_components_own_refusal_is_passed_on(core: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> None:
+    """"Camera is off" is a better thing for a person to read than anything we could invent."""
+    porch = _camera(core, "porch")
+
+    async def off(hass, entity_id):  # noqa: ANN001, ANN202
+        raise HomeAssistantError("Camera is off")
+
+    monkeypatch.setattr(vision, "_lookup_camera", off)
+    with pytest.raises(RpcError) as err:
+        await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+    assert err.value.code == "ha_error" and "off" in err.value.message
+
+
+def test_a_still_is_given_less_time_than_the_two_waits_that_contain_it() -> None:
+    """The budget is not this file's to choose alone; it sits inside two ceilings it cannot see.
+
+    The app aborts the request at 10 s (`apps/mobile/src/api/client.ts`) and the hub gives up on the
+    home's socket at 15 s (`RPC_TIMEOUT_MS`). Overrun either and a slow camera stops being "the
+    camera did not answer" and starts looking like the whole home went quiet — and the re-encode
+    still has to happen inside what is left.
+    """
+    assert vision.SNAPSHOT_TIMEOUT_S <= 8

@@ -15,8 +15,8 @@ with a 1 MB frame cap and no binary frames. A still that fits in one frame is th
 transport can honestly carry; live video is WebRTC with its own signalling and a relay, and a
 different project.
 
-**The picture is made here, not trusted from the camera.** `async_get_image(width=, height=)` is a
-request the camera may ignore, and plenty return full size. So every still is re-encoded with Pillow:
+**The picture is made here, not trusted from the camera.** The width and height we ask a camera for
+are a request it may ignore, and plenty return full size. So every still is re-encoded with Pillow:
 scaled to fit `MAX_WIDTH` x `MAX_HEIGHT`, written as JPEG, and — this matters — without the camera's
 EXIF block, which on some cameras carries GPS coordinates. A picture of the porch must not also be a
 note of where the porch is. If Pillow is missing — it is a core Home Assistant requirement, so this
@@ -27,6 +27,7 @@ well as a large one, and without Pillow there is nothing to remove it with.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import UTC, datetime
 from io import BytesIO
@@ -124,16 +125,71 @@ def _normalise(content: bytes, width: int, height: int) -> tuple[bytes, int, int
         return out.getvalue(), rgb.width, rgb.height
 
 
-async def _get_image(hass: HomeAssistant, entity_id: str, width: int, height: int) -> Any:
-    """Home Assistant's own in-process still. No HTTP, no token, no LAN address ever leaves the house.
+async def _keyframe_image(cam: Any, width: int, height: int) -> bytes | None:
+    """A still decoded from the camera's own stream, waiting for the *next* keyframe.
+
+    Creating the stream starts a decode worker, which is why this is the second choice rather than
+    the first — but it is what Home Assistant's own `camera.snapshot` service does for these
+    cameras, and for a camera that has no still endpoint it is the only thing that works.
+
+    Never the impatient call. `KeyFrameConverter._generate_image` leaves the last decoded frame in
+    place when no new packet is waiting, and `async_get_image` returns it either way, while the
+    `Stream` object outlives the 30 s idle stop — so `wait_for_next_keyframe=False` can hand back a
+    frame from a viewing half an hour ago, and we would stamp it `taken_at` now. For a camera,
+    yesterday's porch presented as this moment's is worse than waiting a second for the real one.
+    """
+    stream = cam.stream or await cam.async_create_stream()
+    if stream is None:
+        return None
+    return await stream.async_get_image(width=width, height=height, wait_for_next_keyframe=True)
+
+
+async def _lookup_camera(hass: HomeAssistant, entity_id: str) -> Any:
+    """The camera entity itself, in the camera component's own words when it will not give one.
 
     Imported here, not at module level: the camera component pulls in its own requirements
     (`turbojpeg`), which a home with no cameras may never have installed — and such a home must still
-    be able to load this integration and list that it has none.
+    be able to load this integration and list that it has none. It is the whole of this module's
+    dependency on that component, which is what lets the tests stand in for it.
+
+    Raises `HomeAssistantError`: "Camera not found", "Camera is off", "Camera integration not set up".
     """
     from homeassistant.components import camera  # noqa: PLC0415
 
-    return await camera.async_get_image(hass, entity_id, timeout=SNAPSHOT_TIMEOUT_S, width=width, height=height)
+    return camera.get_camera_from_entity_id(hass, entity_id)
+
+
+async def _get_image(hass: HomeAssistant, entity_id: str, width: int, height: int) -> bytes:
+    """Home Assistant's own in-process still. No HTTP, no token, no LAN address ever leaves the house.
+
+    **Not `camera.async_get_image`.** That helper asks a stream-backed camera for its still with
+    `wait_for_next_keyframe=False`, which answers only if a keyframe happens to be sitting in the
+    buffer already, and otherwise returns nothing — instantly, or after the whole budget. For an ONVIF
+    doorbell, a Nest, a Shelly, or a `generic` camera configured with only a stream URL — which is
+    most front doors — that is every time but the lucky one. It also swallows `TimeoutError` and
+    re-raises everything as a flat `HomeAssistantError("Unable to get image")`, so a camera that never
+    answered reached the app as a refusal rather than as a wait that ran out.
+
+    So we do what `camera.async_handle_snapshot_service` does: a camera that makes its stills from its
+    stream is asked for the *next* keyframe, and any other camera is asked for a still directly —
+    falling back to the stream when it answers with nothing, since `async_create_stream` gives back
+    nothing of its own for a camera that has no stream to give.
+
+    The budget is ours to impose: the keyframe wait is on a bare `asyncio.Event`, so a camera that
+    never sends another one would wait forever. The decode runs in the executor, so waiting here never
+    blocks the event loop.
+    """
+    cam = await _lookup_camera(hass, entity_id)
+    async with asyncio.timeout(SNAPSHOT_TIMEOUT_S):
+        # `getattr`: an older Home Assistant than this was written against still gets the direct
+        # still and the fallback below, rather than an AttributeError.
+        stream_backed = getattr(cam, "use_stream_for_stills", False)
+        content = None if stream_backed else await cam.async_camera_image(width=width, height=height)
+        if not content:
+            content = await _keyframe_image(cam, width, height)
+    if not content:
+        raise RpcError("ha_error", "the camera did not send a picture")
+    return content
 
 
 async def vision_snapshot(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
@@ -149,14 +205,14 @@ async def vision_snapshot(hass: HomeAssistant, params: dict[str, Any]) -> dict[s
         raise RpcError("ha_error", "the camera is unavailable")
 
     try:
-        image = await _get_image(hass, entity_id, width, height)
+        raw = await _get_image(hass, entity_id, width, height)
     except TimeoutError as err:
         raise RpcError("timeout", "the camera did not send a picture in time") from err
     except HomeAssistantError as err:
         raise RpcError("ha_error", str(err) or "the camera could not send a picture") from err
 
     try:
-        content, out_w, out_h = await hass.async_add_executor_job(_normalise, image.content, width, height)
+        content, out_w, out_h = await hass.async_add_executor_job(_normalise, raw, width, height)
     except ImportError:
         raise RpcError("ha_error", "this Home Assistant cannot prepare camera pictures safely") from None
     except Exception as err:  # noqa: BLE001 — a camera can send anything, and a bad frame is not our crash
