@@ -34,6 +34,7 @@ CAPABILITIES: tuple[str, ...] = (
     "entities.subscribe",
     "entities.history",
     "helpers.manage",
+    "labels.manage",
     "services.read",
     "automations.read",
     "automations.write",
@@ -53,7 +54,7 @@ CAPABILITIES: tuple[str, ...] = (
 # Capabilities that wait for the owner's yes. Most of them operate the home; `entities.history` is
 # only a read, and is here because a month of readings shows when the house is empty (AgDR-0036).
 OPT_IN_CAPABILITIES: frozenset[str] = frozenset(
-    {"devices.control", "routines.run", "integrations.manage", "areas.manage", "entities.manage", "access.control", "vision.view", "entities.history", "helpers.manage"}
+    {"devices.control", "routines.run", "integrations.manage", "areas.manage", "entities.manage", "access.control", "vision.view", "entities.history", "helpers.manage", "labels.manage"}
 )
 # Capabilities the user toggles in the options UI (`conversation` is derived from the assistant mode).
 TOGGLEABLE_CAPABILITIES: tuple[str, ...] = tuple(c for c in CAPABILITIES if c != "conversation")
@@ -84,6 +85,16 @@ CAPABILITY_FOR_METHOD: dict[str, str] = {
     "helpers.update": "helpers.manage",
     "helpers.rename": "helpers.manage",
     "helpers.delete": "helpers.manage",
+    "labels.list": "labels.manage",
+    "labels.create": "labels.manage",
+    "labels.update": "labels.manage",
+    "labels.delete": "labels.manage",
+    "labels.assign": "labels.manage",
+    "categories.list": "labels.manage",
+    "categories.create": "labels.manage",
+    "categories.update": "labels.manage",
+    "categories.delete": "labels.manage",
+    "categories.assign": "labels.manage",
     "services.list": "services.read",
     "automations.list": "automations.read",
     "automations.get": "automations.read",

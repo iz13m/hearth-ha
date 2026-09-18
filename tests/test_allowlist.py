@@ -41,7 +41,8 @@ def test_control_is_limited_to_opt_in_methods() -> None:
     """Every method behind an opt-in switch, named here so adding one is a decision.
 
     All of them operate the home except `states.history`, which only reads, and the `helpers.*`
-    family, which changes the home's *configuration* rather than the home (AgDR-0039) — it is opt-in because a
+    and `labels.*`/`categories.*` families, which change the home's *configuration* rather than the
+    home (AgDR-0039, AgDR-0040) — it is opt-in because a
     month of readings shows when the house is empty, not because it changes anything (AgDR-0036).
     """
     control = {m for m in ALLOWED_METHODS if CAPABILITY_FOR_METHOD[m] in OPT_IN_CAPABILITIES}
@@ -54,6 +55,16 @@ def test_control_is_limited_to_opt_in_methods() -> None:
         "helpers.update",
         "helpers.rename",
         "helpers.delete",
+        "labels.list",
+        "labels.create",
+        "labels.update",
+        "labels.delete",
+        "labels.assign",
+        "categories.list",
+        "categories.create",
+        "categories.update",
+        "categories.delete",
+        "categories.assign",
         "devices.call",
         "scenes.activate",
         "scripts.run",
