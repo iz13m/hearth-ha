@@ -317,9 +317,51 @@ async def test_the_camera_components_own_refusal_is_passed_on(core: HomeAssistan
 def test_a_still_is_given_less_time_than_the_two_waits_that_contain_it() -> None:
     """The budget is not this file's to choose alone; it sits inside two ceilings it cannot see.
 
-    The app aborts the request at 10 s (`apps/mobile/src/api/client.ts`) and the hub gives up on the
-    home's socket at 15 s (`RPC_TIMEOUT_MS`). Overrun either and a slow camera stops being "the
+    The app gives a still `SNAPSHOT_TIMEOUT_MS` (`apps/mobile/src/cameras.ts`) and the hub gives up on
+    the home's socket at 15 s (`RPC_TIMEOUT_MS`). Overrun either and a slow camera stops being "the
     camera did not answer" and starts looking like the whole home went quiet — and the re-encode
     still has to happen inside what is left.
     """
-    assert vision.SNAPSHOT_TIMEOUT_S <= 8
+    assert vision.SNAPSHOT_TIMEOUT_S <= 12
+    # Each stage may spend the budget, but none may promise more than there is.
+    assert max(vision.STREAM_START_TIMEOUT_S, vision.KEYFRAME_TIMEOUT_S, vision.STILL_TIMEOUT_S) <= vision.SNAPSHOT_TIMEOUT_S
+
+
+async def test_a_timeout_says_which_stage_ran_out(core: HomeAssistant, camera_is, monkeypatch: pytest.MonkeyPatch) -> None:
+    """"The camera did not answer" is true of three different faults, and they are fixed differently.
+
+    A camera Home Assistant cannot open a video for at all is a network or a credentials problem; one
+    whose video opens but carries no new frame is a camera that is not sending. The app shows one
+    sentence either way, but the hub's audit log keeps these words, and they are what someone reads
+    when a household says a camera has gone dark.
+    """
+    porch = _camera(core, "porch")
+    monkeypatch.setattr(vision, "SNAPSHOT_TIMEOUT_S", 0.1)
+    d = build_dispatcher(core)
+
+    class _SlowToOpen(_FakeCamera):
+        async def async_create_stream(self):  # noqa: ANN201
+            await asyncio.Event().wait()
+
+    camera_is(_SlowToOpen(use_stream_for_stills=True))
+    with pytest.raises(RpcError) as err:
+        await d.dispatch("vision.snapshot", {"entity_id": porch})
+    assert err.value.code == "timeout" and "open the camera's video" in err.value.message
+
+    class _Silent(_FakeStream):
+        async def async_get_image(self, width=None, height=None, wait_for_next_keyframe=False):  # noqa: ANN001, ANN201
+            await asyncio.Event().wait()
+
+    camera_is(_FakeCamera(stream=_Silent({}), use_stream_for_stills=True))
+    with pytest.raises(RpcError) as err:
+        await d.dispatch("vision.snapshot", {"entity_id": porch})
+    assert err.value.code == "timeout" and "no new frame" in err.value.message
+
+    class _Mute(_FakeCamera):
+        async def async_camera_image(self, width=None, height=None):  # noqa: ANN001, ANN201
+            await asyncio.Event().wait()
+
+    camera_is(_Mute())
+    with pytest.raises(RpcError) as err:
+        await d.dispatch("vision.snapshot", {"entity_id": porch})
+    assert err.value.code == "timeout" and "answer with a picture" in err.value.message

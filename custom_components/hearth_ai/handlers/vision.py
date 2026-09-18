@@ -31,6 +31,7 @@ import asyncio
 import base64
 from datetime import UTC, datetime
 from io import BytesIO
+from time import monotonic
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -52,8 +53,30 @@ JPEG_QUALITY = 70
 # Raw bytes; base64 adds a third. Leaves a wide margin under the 1 MB frame for the envelope.
 MAX_BYTES = 450_000
 # Inside the hub's 15 s read timeout, so a slow camera fails as "the camera did not answer" here
-# rather than as an RPC timeout that looks like the home went offline.
-SNAPSHOT_TIMEOUT_S = 8
+# rather than as an RPC timeout that looks like the home went offline. Eight seconds was too tight
+# for a camera being woken from cold: opening an RTSP stream and then waiting out a group of pictures
+# can spend most of it, and the one still this home ever managed took 4.3 s with the stream already
+# starting.
+SNAPSHOT_TIMEOUT_S = 11
+# Asking Home Assistant to open the camera's video. A camera it cannot reach at all fails here.
+STREAM_START_TIMEOUT_S = 4
+# Waiting for the camera's next keyframe once the video is open. A group of pictures is usually one
+# to four seconds; a camera that never sends one waits out the rest of the budget.
+KEYFRAME_TIMEOUT_S = 8
+# One direct still from a camera that has an endpoint for it. Short: its fallback needs the time.
+STILL_TIMEOUT_S = 3
+
+
+def _left(deadline: float, cap: float) -> float:
+    """What one stage may take: the rest of the budget, never more than the stage's own ceiling.
+
+    The stage ceilings deliberately over-sum. Each one is there so a single hung step cannot eat the
+    time the step after it needs; the deadline is what actually bounds the whole.
+    """
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError("the camera did not send a picture in time")
+    return min(cap, remaining)
 
 
 def _camera_state(hass: HomeAssistant, entity_id: str) -> Any:
@@ -125,7 +148,7 @@ def _normalise(content: bytes, width: int, height: int) -> tuple[bytes, int, int
         return out.getvalue(), rgb.width, rgb.height
 
 
-async def _keyframe_image(cam: Any, width: int, height: int) -> bytes | None:
+async def _keyframe_image(cam: Any, width: int, height: int, deadline: float) -> bytes | None:
     """A still decoded from the camera's own stream, waiting for the *next* keyframe.
 
     Creating the stream starts a decode worker, which is why this is the second choice rather than
@@ -138,10 +161,20 @@ async def _keyframe_image(cam: Any, width: int, height: int) -> bytes | None:
     frame from a viewing half an hour ago, and we would stamp it `taken_at` now. For a camera,
     yesterday's porch presented as this moment's is worse than waiting a second for the real one.
     """
-    stream = cam.stream or await cam.async_create_stream()
+    stream = cam.stream
+    if stream is None:
+        try:
+            async with asyncio.timeout(_left(deadline, STREAM_START_TIMEOUT_S)):
+                stream = await cam.async_create_stream()
+        except TimeoutError as err:
+            raise RpcError("timeout", "Home Assistant could not open the camera's video in time") from err
     if stream is None:
         return None
-    return await stream.async_get_image(width=width, height=height, wait_for_next_keyframe=True)
+    try:
+        async with asyncio.timeout(_left(deadline, KEYFRAME_TIMEOUT_S)):
+            return await stream.async_get_image(width=width, height=height, wait_for_next_keyframe=True)
+    except TimeoutError as err:
+        raise RpcError("timeout", "the camera's video carried no new frame in time") from err
 
 
 async def _lookup_camera(hass: HomeAssistant, entity_id: str) -> Any:
@@ -180,13 +213,23 @@ async def _get_image(hass: HomeAssistant, entity_id: str, width: int, height: in
     blocks the event loop.
     """
     cam = await _lookup_camera(hass, entity_id)
-    async with asyncio.timeout(SNAPSHOT_TIMEOUT_S):
+    deadline = monotonic() + SNAPSHOT_TIMEOUT_S
+    # A backstop, a moment after the deadline the stages hold themselves to, so that whichever stage
+    # ran out is the one that says so. Expiring together would leave the generic message and lose the
+    # only part worth reading — which of the three faults it was.
+    async with asyncio.timeout(SNAPSHOT_TIMEOUT_S + 1):
         # `getattr`: an older Home Assistant than this was written against still gets the direct
         # still and the fallback below, rather than an AttributeError.
         stream_backed = getattr(cam, "use_stream_for_stills", False)
-        content = None if stream_backed else await cam.async_camera_image(width=width, height=height)
+        content = None
+        if not stream_backed:
+            try:
+                async with asyncio.timeout(_left(deadline, STILL_TIMEOUT_S)):
+                    content = await cam.async_camera_image(width=width, height=height)
+            except TimeoutError as err:
+                raise RpcError("timeout", "the camera did not answer with a picture in time") from err
         if not content:
-            content = await _keyframe_image(cam, width, height)
+            content = await _keyframe_image(cam, width, height, deadline)
     if not content:
         raise RpcError("ha_error", "the camera did not send a picture")
     return content
