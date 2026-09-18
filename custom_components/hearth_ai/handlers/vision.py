@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from datetime import UTC, datetime
+from contextlib import suppress
 from io import BytesIO
 from time import monotonic
 from typing import Any
@@ -65,6 +66,8 @@ STREAM_START_TIMEOUT_S = 4
 KEYFRAME_TIMEOUT_S = 8
 # One direct still from a camera that has an endpoint for it. Short: its fallback needs the time.
 STILL_TIMEOUT_S = 3
+# go2rtc answering out of the video it already holds. No decode here, so this is quick or not at all.
+PROVIDER_TIMEOUT_S = 4
 
 
 def _left(deadline: float, cap: float) -> float:
@@ -148,12 +151,18 @@ def _normalise(content: bytes, width: int, height: int) -> tuple[bytes, int, int
         return out.getvalue(), rgb.width, rgb.height
 
 
-async def _keyframe_image(cam: Any, width: int, height: int, deadline: float) -> bytes | None:
-    """A still decoded from the camera's own stream, waiting for the *next* keyframe.
+async def _video_still(cam: Any, width: int, height: int, deadline: float) -> bytes | None:
+    """A still from the camera's video, by either of the two routes Home Assistant has to one.
 
-    Creating the stream starts a decode worker, which is why this is the second choice rather than
-    the first — but it is what Home Assistant's own `camera.snapshot` service does for these
-    cameras, and for a camera that has no still endpoint it is the only thing that works.
+    **go2rtc first**, as `camera._async_get_stream_image` does. When a home runs it — Home Assistant
+    ships it — go2rtc already holds the camera's video and will return a JPEG over its own REST API,
+    with no packet for us to decode and no keyframe to wait for. It is a wholly separate route from
+    the one below, which matters: a camera whose video opens but sends this house no keyframe may
+    still have a picture here.
+
+    **Then the stream's next keyframe.** Creating the stream starts a decode worker, which is why
+    this is the second choice — but it is what Home Assistant's own `camera.snapshot` service does,
+    and for a camera with no still endpoint it is the only thing left.
 
     Never the impatient call. `KeyFrameConverter._generate_image` leaves the last decoded frame in
     place when no new packet is waiting, and `async_get_image` returns it either way, while the
@@ -161,17 +170,28 @@ async def _keyframe_image(cam: Any, width: int, height: int, deadline: float) ->
     frame from a viewing half an hour ago, and we would stamp it `taken_at` now. For a camera,
     yesterday's porch presented as this moment's is worse than waiting a second for the real one.
     """
+    # Best effort: a provider that cannot reach the camera raises or answers nothing, and the stream
+    # below is still worth trying. `HomeAssistantError` here is go2rtc saying it has no source.
+    provider = getattr(cam, "webrtc_provider", None)
+    if provider is not None:
+        with suppress(TimeoutError, HomeAssistantError):
+            async with asyncio.timeout(_left(deadline, PROVIDER_TIMEOUT_S)):
+                if image := await provider.async_get_image(cam, width=width, height=height):
+                    return image
+
     stream = cam.stream
     if stream is None:
+        allowance = _left(deadline, STREAM_START_TIMEOUT_S)
         try:
-            async with asyncio.timeout(_left(deadline, STREAM_START_TIMEOUT_S)):
+            async with asyncio.timeout(allowance):
                 stream = await cam.async_create_stream()
         except TimeoutError as err:
             raise RpcError("timeout", "Home Assistant could not open the camera's video in time") from err
     if stream is None:
         return None
+    allowance = _left(deadline, KEYFRAME_TIMEOUT_S)
     try:
-        async with asyncio.timeout(_left(deadline, KEYFRAME_TIMEOUT_S)):
+        async with asyncio.timeout(allowance):
             return await stream.async_get_image(width=width, height=height, wait_for_next_keyframe=True)
     except TimeoutError as err:
         raise RpcError("timeout", "the camera's video carried no new frame in time") from err
@@ -222,15 +242,31 @@ async def _get_image(hass: HomeAssistant, entity_id: str, width: int, height: in
         # still and the fallback below, rather than an AttributeError.
         stream_backed = getattr(cam, "use_stream_for_stills", False)
         content = None
+        # A still endpoint that hangs is not the end of it: a camera can have a dead still URL and
+        # perfectly good video, which is this home's `camera.living_room`. Give it its short slice,
+        # then go to the video exactly as an empty answer does — but remember, so that if the video
+        # has nothing either, the refusal names the endpoint that actually hung.
+        still_hung = False
         if not stream_backed:
             try:
-                async with asyncio.timeout(_left(deadline, STILL_TIMEOUT_S)):
+                allowance = _left(deadline, STILL_TIMEOUT_S)
+                async with asyncio.timeout(allowance):
                     content = await cam.async_camera_image(width=width, height=height)
-            except TimeoutError as err:
-                raise RpcError("timeout", "the camera did not answer with a picture in time") from err
+            except TimeoutError:
+                still_hung = True
         if not content:
-            content = await _keyframe_image(cam, width, height, deadline)
+            try:
+                content = await _video_still(cam, width, height, deadline)
+            except TimeoutError:
+                # The still hung long enough that the video never got a turn. Its own stages raise
+                # `RpcError` and those are the better words, so only the bare "out of budget" lands
+                # here — and then the endpoint that hung is the whole story.
+                if still_hung:
+                    raise RpcError("timeout", "the camera did not answer with a picture in time") from None
+                raise
     if not content:
+        if still_hung:
+            raise RpcError("timeout", "the camera did not answer with a picture in time")
         raise RpcError("ha_error", "the camera did not send a picture")
     return content
 

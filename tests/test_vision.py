@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from io import BytesIO
+from typing import Any
 
 import pytest
 from PIL import Image as PILImage
@@ -82,11 +83,19 @@ class _FakeStream:
 class _FakeCamera:
     """A camera entity, with the two properties a still depends on."""
 
-    def __init__(self, *, still: bytes | None = None, stream: _FakeStream | None = None, use_stream_for_stills: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        still: bytes | None = None,
+        stream: _FakeStream | None = None,
+        use_stream_for_stills: bool = False,
+        webrtc_provider: Any = None,
+    ) -> None:
         self.still = still
         self.stream: _FakeStream | None = None
         self._created = stream
         self.use_stream_for_stills = use_stream_for_stills
+        self.webrtc_provider = webrtc_provider
         self.asked: list[dict] = []
         self.streams_created = 0
 
@@ -365,3 +374,71 @@ async def test_a_timeout_says_which_stage_ran_out(core: HomeAssistant, camera_is
     with pytest.raises(RpcError) as err:
         await d.dispatch("vision.snapshot", {"entity_id": porch})
     assert err.value.code == "timeout" and "answer with a picture" in err.value.message
+
+
+class _FakeProvider:
+    """go2rtc, which answers out of the video it already holds — no packet here to decode."""
+
+    def __init__(self, image: bytes | None = None, error: Exception | None = None) -> None:
+        self.image, self.error = image, error
+        self.asked: list[dict] = []
+
+    async def async_get_image(self, cam, width=None, height=None):  # noqa: ANN001, ANN201
+        self.asked.append({"width": width, "height": height})
+        if self.error is not None:
+            raise self.error
+        return self.image
+
+
+async def test_go2rtc_answers_before_anyone_waits_for_a_keyframe(core: HomeAssistant, camera_is) -> None:
+    """A separate route to the same video, and the one Home Assistant reaches for first.
+
+    It matters for a camera whose video opens but sends this house no keyframe: go2rtc holds the
+    stream already and returns a JPEG over its own REST API, with nothing to wait for.
+    """
+    porch = _camera(core, "porch")
+    provider = _FakeProvider(_jpeg(1920, 1080))
+    stream = _FakeStream({False: None, True: _jpeg(640, 480)})
+    cam = camera_is(_FakeCamera(stream=stream, use_stream_for_stills=True, webrtc_provider=provider))
+
+    out = await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+
+    assert (out["width"], out["height"]) == (640, 360)
+    assert provider.asked == [{"width": 640, "height": 480}]
+    # Nothing was decoded and no worker was started: that is the whole point of asking it first.
+    assert stream.asked == [] and cam.streams_created == 0
+
+
+async def test_a_provider_with_nothing_to_say_does_not_stop_the_stream(core: HomeAssistant, camera_is) -> None:
+    """go2rtc that cannot reach the camera raises `HomeAssistantError`; the keyframe is still there."""
+    porch = _camera(core, "porch")
+    stream = _FakeStream({False: None, True: _jpeg(640, 480)})
+    camera_is(_FakeCamera(stream=stream, use_stream_for_stills=True, webrtc_provider=_FakeProvider(error=HomeAssistantError("Camera has no stream source"))))
+
+    out = await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+
+    assert (out["width"], out["height"]) == (640, 480)
+    assert stream.asked == [{"width": 640, "height": 480, "wait_for_next_keyframe": True}]
+
+
+async def test_a_still_endpoint_that_hangs_falls_back_to_the_video(core: HomeAssistant, camera_is, monkeypatch: pytest.MonkeyPatch) -> None:
+    """This home's `camera.living_room`: a dead still URL and video that works.
+
+    0.24.1 gave the still its own short slice and then refused outright when it ran out, so the
+    camera's video was never tried at all. A still that hangs has to mean the same as one that comes
+    back empty.
+    """
+    porch = _camera(core, "porch")
+    monkeypatch.setattr(vision, "STILL_TIMEOUT_S", 0.05)
+    stream = _FakeStream({False: None, True: _jpeg(800, 600)})
+
+    class _DeadStillUrl(_FakeCamera):
+        async def async_camera_image(self, width=None, height=None):  # noqa: ANN001, ANN201
+            await asyncio.Event().wait()
+
+    camera_is(_DeadStillUrl(stream=stream))
+
+    out = await build_dispatcher(core).dispatch("vision.snapshot", {"entity_id": porch})
+
+    assert (out["width"], out["height"]) == (640, 480)
+    assert stream.asked == [{"width": 640, "height": 480, "wait_for_next_keyframe": True}]
