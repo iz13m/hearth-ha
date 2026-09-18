@@ -66,6 +66,41 @@ async def test_every_collection_helper_can_be_made_and_removed(core: HomeAssista
     assert core.states.get(entity_id) is None
 
 
+async def test_a_new_helper_says_whether_hearth_can_read_it(core: HomeAssistant) -> None:
+    """The seam that read as a bug: Hearth makes an entity and then cannot see its state.
+
+    Home Assistant shares a new entity with Assist only for a few domains and device classes, and
+    most helpers are neither — an `input_boolean` is not a shared domain, a `trend` binary_sensor has
+    no device class. So `shared: false` is the ordinary outcome, and the answer has to say so rather
+    than leave a model to guess at a sync delay that will never end.
+    """
+    from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
+
+    assert await async_setup_component(core, "input_boolean", {"input_boolean": {}})
+    await core.async_block_till_done()
+    d = build_dispatcher(core, CAPS)
+
+    made = await d.dispatch("helpers.create", {"domain": "input_boolean", "config": {"name": "Guests coming"}})
+    assert made["shared"] is False
+    assert next(r for r in await d.dispatch("helpers.list", {}) if r["id"] == made["id"])["shared"] is False
+
+    # ...and it flips once the household shares it, which only a person can do.
+    async_expose_entity(core, "conversation", made["entities"][0], True)
+    assert next(r for r in await d.dispatch("helpers.list", {}) if r["id"] == made["id"])["shared"] is True
+
+
+async def test_a_helper_with_nothing_readable_is_not_called_shared(core: HomeAssistant) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    entry = MockConfigEntry(domain="group", title="All doors")
+    entry.add_to_hass(core)
+    er.async_get(core).async_get_or_create("lock", "group", "all_doors", config_entry=entry, suggested_object_id="all_doors")
+    d = build_dispatcher(core, CAPS)
+
+    row = next(r for r in await d.dispatch("helpers.list", {}) if r["id"] == entry.entry_id)
+    assert row["entities"] == [] and row["restricted"] is True and row["shared"] is False
+
+
 async def test_a_collection_helper_can_be_reconfigured(core: HomeAssistant) -> None:
     assert await async_setup_component(core, "timer", {"timer": {}})
     await core.async_block_till_done()

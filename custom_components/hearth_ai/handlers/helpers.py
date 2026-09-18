@@ -32,7 +32,7 @@ from homeassistant.loader import async_get_config_flows, async_get_integrations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .flows import DENIED_DOMAINS, check_flow_input, forget_fields, serialize_field_map, shape
-from .registry import OFF_LIMITS
+from .registry import OFF_LIMITS, _exposed
 
 FLOW_TIMEOUT_S = 30
 
@@ -161,10 +161,27 @@ def _entry_dto(hass: HomeAssistant, entry: Any) -> dict[str, Any]:
         "name": entry.title,
         "entities": visible,
         "restricted": len(visible) != len(ids),
+        "shared": _shared(hass, visible),
     }
 
 
-def _item_dto(domain: str, item: dict[str, Any]) -> dict[str, Any]:
+def _shared(hass: HomeAssistant, entity_ids: list[str]) -> bool:
+    """Whether Hearth can *read* what this helper produces, as opposed to having made it.
+
+    Home Assistant shares a new entity with Assist only if its domain or device class is one it
+    shares by default, and most helpers are neither: a `trend` binary_sensor has no device class,
+    an `input_boolean` is not a shared domain. So the ordinary outcome of making a helper is an
+    entity Hearth cannot see the state of — which, without being told, reads as a bug or a delay.
+
+    It is not one, and it is not fixed by sharing it automatically: exposure is the household's
+    setting, and a model that could widen it could widen its own reach mid-turn (AgDR-0024). Saying
+    so is the honest answer, and it is what this flag is for. An automation may reference the entity
+    either way; exposure filters what Hearth *lists*, not what Home Assistant can trigger on.
+    """
+    return bool(entity_ids) and all(_exposed(hass, entity_id) for entity_id in entity_ids)
+
+
+def _item_dto(hass: HomeAssistant, domain: str, item: dict[str, Any]) -> dict[str, Any]:
     entity_id = f"{domain}.{item['id']}"
     return {
         "id": entity_id,
@@ -173,6 +190,7 @@ def _item_dto(domain: str, item: dict[str, Any]) -> dict[str, Any]:
         "name": item.get("name") or item["id"],
         "entities": [entity_id],
         "restricted": False,
+        "shared": _shared(hass, [entity_id]),
     }
 
 
@@ -260,7 +278,7 @@ async def helpers_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
     for domain in INPUT_DOMAINS:
         with suppress(RpcError):
             store = _collection(hass, domain)
-            rows += [_item_dto(domain, item) for item in store.async_items()]
+            rows += [_item_dto(hass, domain, item) for item in store.async_items()]
     return sorted(rows, key=lambda r: (r["domain"], r["name"] or ""))
 
 
@@ -311,7 +329,7 @@ async def helpers_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
             item = await store.async_create_item(dict(config))
         except Exception as err:  # noqa: BLE001 - vol.Invalid, ValueError: all mean "bad form"
             raise RpcError("validation_failed", f"{type(err).__name__}: {err}") from err
-        return _item_dto(domain, item)
+        return _item_dto(hass, domain, item)
 
     if domain not in await _flow_domains(hass):
         raise RpcError("not_found", f"{domain} is not a helper; use search_available_integrations for devices and services")
@@ -387,7 +405,7 @@ async def helpers_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
         item = await _collection(hass, domain).async_update_item(item_id, merged)
     except Exception as err:  # noqa: BLE001 - a validation error from the collection's own schema
         raise RpcError("validation_failed", f"{type(err).__name__}: {err}") from err
-    return _item_dto(domain, item)
+    return _item_dto(hass, domain, item)
 
 
 async def helpers_rename(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
@@ -405,7 +423,7 @@ async def helpers_rename(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
             item = await _collection(hass, domain).async_update_item(item_id, merged)
         except Exception as err:  # noqa: BLE001 - ItemNotFound or a validation error
             raise RpcError("validation_failed", f"{type(err).__name__}: {err}") from err
-        return _item_dto(domain, item)
+        return _item_dto(hass, domain, item)
 
     entry = hass.config_entries.async_get_entry(helper_id)
     if entry is None or entry.domain not in await _flow_domains(hass):
