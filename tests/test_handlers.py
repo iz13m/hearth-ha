@@ -194,3 +194,46 @@ async def test_entities_list_pages_by_keyset(core: HomeAssistant) -> None:
     with pytest.raises(RpcError) as ei:
         await d.dispatch("entities.list", {"after": 7})
     assert ei.value.code == "invalid_params"
+
+
+async def test_refuses_a_script_that_turns_on_a_scene_setting_a_lock(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    The last way round the promise that a lock is refused to every model (#126).
+
+    `scene.turn_on` is an allowed action, its target is in `scene`, and what the scene *contains* is
+    only knowable here — so the hub cannot decide it and `find_policy_violations` never saw it. A
+    scene the owner wrote by hand could set a lock, and a script Hearth wrote could activate it.
+    Scenes are checked when they *run* (AgDR-0012), but a script is not, which is why this is
+    checked when the script is *written*.
+    """
+    core.states.async_set("scene.open_the_gate", "unknown", {"friendly_name": "Open the gate", "entity_id": ["lock.gate"]})
+    core.states.async_set("scene.movie_night", "unknown", {"friendly_name": "Movie night", "entity_id": ["light.hall"]})
+    d = build_dispatcher(core)
+
+    nested = {"alias": "Let me in", "sequence": [{"action": "scene.turn_on", "target": {"entity_id": "scene.open_the_gate"}}]}
+    res = await d.dispatch("scripts.validate", {"key": "let_me_in", "config": nested})
+    assert res["ok"] is False and res["status"] == "policy"
+    assert "lock.gate" in res["error"]
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("scripts.create", {"key": "let_me_in", "config": nested})
+    assert ei.value.code == "validation_failed"
+    assert "scripts.yaml" not in [p.name for p in tmp_path.iterdir()] or not (tmp_path / "scripts.yaml").read_text().strip("{}\n")
+
+    # Nested in a branch, and reached through an automation, which is the default-on capability.
+    buried = {
+        "alias": "Let me in quietly",
+        "triggers": [{"trigger": "state", "entity_id": "input_boolean.test", "to": "on"}],
+        "actions": [{"choose": [{"conditions": [], "sequence": [{"action": "scene.turn_on", "target": {"entity_id": "scene.open_the_gate"}}]}]}],
+    }
+    res = await d.dispatch("automations.validate", {"config": buried})
+    assert res["ok"] is False and res["status"] == "policy"
+
+    # A target that names no scene is refused rather than ignored: `all` is ENTITY_MATCH_ALL, which
+    # is every scene in the house including the gate, and an area cannot be resolved to scenes here.
+    for target in ({"entity_id": "all"}, {"area_id": "hall"}, {"device_id": "abc"}):
+        res = await d.dispatch("scripts.validate", {"key": "sweep", "config": {"alias": "Sweep", "sequence": [{"action": "scene.turn_on", "target": target}]}})
+        assert res["ok"] is False and res["status"] == "policy", target
+
+    # A scene of lights is the ordinary case and must still be writable.
+    fine = {"alias": "Film time", "sequence": [{"action": "scene.turn_on", "target": {"entity_id": "scene.movie_night"}}]}
+    assert (await d.dispatch("scripts.validate", {"key": "film_time", "config": fine}))["ok"] is True

@@ -40,6 +40,14 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "system_log.write",
         "logger.set_level",
         "persistent_notification.dismiss_all",
+        # Hearth never triggers an automation, and never flips one on or off from inside a config it
+        # authored. `automations.set_enabled` is the one sanctioned path and it is an RPC method
+        # under `automations.write`, checked and audited as itself — not a line a model can bury in
+        # a script, where turning an automation off is how you quietly disarm someone else's rule.
+        "automation.trigger",
+        "automation.turn_on",
+        "automation.turn_off",
+        "automation.toggle",
     }
 )
 DENIED_ENTITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera", "device_tracker", "person"})
@@ -94,6 +102,34 @@ def _entity_ids(target: Any) -> list[str]:
     if isinstance(v, list):
         return [x for x in v if isinstance(x, str)]
     return []
+
+
+def _scene_entity_ids(node: dict[str, Any]) -> list[str]:
+    """The entities a `scene` service call sets or snapshots — mirror of sceneEntityIds in policy.ts.
+
+    `scene.apply` takes `{entities: {"lock.front_door": {state: "unlocked"}}}` and `scene.create`
+    takes `{snapshot_entities: ["lock.front_door"]}`. Neither puts an id where `_entity_ids` looks —
+    one hides it in an object *key*, the other in a bare list — so a lock could ride into an
+    automation as scene data and HA would apply it on the model's behalf.
+    """
+    out: list[str] = []
+
+    def push(value: Any) -> None:
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, list):
+            out.extend(x for x in value if isinstance(x, str))
+
+    for src in (node, node.get("data")):
+        if not isinstance(src, dict):
+            continue
+        entities = src.get("entities")
+        if isinstance(entities, dict):
+            out.extend(str(k) for k in entities)
+        else:
+            push(entities)
+        push(src.get("snapshot_entities"))
+    return out
 
 
 REFERENCEABLE_DENIED_DOMAINS: frozenset[str] = DENIED_ENTITY_DOMAINS | {"image"}
@@ -169,9 +205,20 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
                 problems.append(f"{p}: action {action} targets denied domain {dom}")
             if action in DENIED_ACTIONS:
                 problems.append(f"{p}: action {action} is not allowed")
-            for eid in _entity_ids(node.get("target")) + _entity_ids(node.get("data")) + _entity_ids(node):
+            ids = _entity_ids(node.get("target")) + _entity_ids(node.get("data")) + _entity_ids(node)
+            if dom == "scene":
+                ids += _scene_entity_ids(node)
+            for eid in ids:
                 if _domain(eid) in DENIED_ENTITY_DOMAINS:
                     problems.append(f"{p}: entity {eid} is in denied domain {_domain(eid)}")
+        # A device action names no entity and carries no service: `{device_id, domain: "lock",
+        # type: "unlock"}` has no `action` key at all, so everything above skips it while HA still
+        # opens the door. The check is therefore on the shape and sits outside the action branch.
+        # It catches a device *trigger* and *condition* too, deliberately — the same three keys are
+        # all three shapes, and a lock is something the model may not even read the state of.
+        device_domain = node.get("domain")
+        if isinstance(device_domain, str) and device_domain in DENIED_ENTITY_DOMAINS and ("type" in node or "device_id" in node):
+            problems.append(f"{p}: device in denied domain {device_domain}")
         for k, v in node.items():
             if k in _LIST_KEYS or isinstance(v, (dict, list)):
                 visit(v, f"{p}.{k}")

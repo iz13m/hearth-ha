@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 import uuid
 
@@ -13,7 +14,7 @@ from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from ..policy import DENIED_ENTITY_DOMAINS, find_scene_policy_violations
+from ..policy import DENIED_ENTITY_DOMAINS, _entity_ids, find_reference_violations, find_scene_policy_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import _exposed
@@ -28,7 +29,7 @@ def _entity_id(hass: HomeAssistant, key: str) -> str | None:
 
 
 def _validate(config: dict[str, Any]) -> None:
-    if violations := find_scene_policy_violations(config):
+    if violations := find_scene_policy_violations(config) + find_reference_violations(config, "config"):
         raise RpcError("validation_failed", "policy: " + "; ".join(violations))
     try:
         SCENE_PLATFORM_SCHEMA(config)
@@ -106,6 +107,59 @@ async def _config_for_entity(hass: HomeAssistant, entity_id: str) -> dict[str, A
 
 async def scene_run_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
     return find_scene_run_violations(hass, entity_id, await _config_for_entity(hass, entity_id))
+
+
+def _nodes(node: Any) -> Iterator[dict[str, Any]]:
+    """Every mapping inside a config — the same reach the policy walker has."""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _nodes(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _nodes(v)
+
+
+# A target Hearth cannot turn into a list of named scenes. Refused rather than ignored, for the same
+# reason a templated action name is (AgDR-0038): what it would activate is unknowable until it runs.
+_UNRESOLVABLE_TARGET_KEYS = ("device_id", "area_id", "floor_id", "label_id")
+
+
+async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list[str]:
+    """
+    Why a script or automation may not be written: it activates a scene that sets a denied entity.
+
+    Scenes are checked when they run (AgDR-0012), and `find_policy_violations` checks the actions a
+    config carries — but neither sees through `scene.turn_on`. The action is allowed, its target is
+    in `scene`, and what that scene *contains* is only knowable on the box, from the entity's
+    membership attribute or scenes.yaml. So a model with `scripts.write` could write
+    `scene.turn_on: scene.gate` and let a hand-written scene do the unlocking. This check has no
+    mirror on the hub for the same reason: the hub cannot see a scene's contents.
+
+    Async because it reuses `scene_run_violations` unchanged — authoring and activation must never
+    disagree about the same scene. Both callers are already coroutines and validate before taking
+    the file lock, which is the order to keep.
+    """
+    problems: list[str] = []
+    checked: set[str] = set()
+    for node in _nodes(config):
+        if node.get("action", node.get("service")) != f"{SCENE_DOMAIN}.turn_on":
+            continue
+        target = node.get("target") if isinstance(node.get("target"), dict) else {}
+        for key in _UNRESOLVABLE_TARGET_KEYS:
+            if key in target or key in node:
+                problems.append(f"scene.turn_on by {key}: Hearth cannot tell which scenes that would activate")
+        for eid in _entity_ids(target) + _entity_ids(node.get("data")) + _entity_ids(node):
+            if eid in checked:
+                continue
+            checked.add(eid)
+            # `entity_id: all` is ENTITY_MATCH_ALL — every scene in the house, including one that
+            # sets a lock — and a templated id is unknowable. Neither is a named scene.
+            if not eid.startswith(f"{SCENE_DOMAIN}."):
+                problems.append(f"scene.turn_on {eid}: only a named scene entity may be activated from a config")
+                continue
+            problems += await scene_run_violations(hass, eid)
+    return list(dict.fromkeys(problems))
 
 
 async def scenes_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[str, Any]]:

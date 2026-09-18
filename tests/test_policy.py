@@ -89,3 +89,39 @@ def test_a_templated_action_name_is_refused() -> None:
     v = find_policy_violations({"actions": [{"action": "{{ 'lock.unlock' }}"}]})
     assert any("is a template" in x for x in v)
     assert find_policy_violations({"actions": [{"action": "light.turn_on"}]}) == []
+
+
+def test_the_walkers_agree_on_every_shared_case() -> None:
+    """
+    The same configs, the same verdicts, in both languages.
+
+    `test_lists_match_shared` pins the denied lists, and the cases below were mirrored by hand —
+    which is how `scene.apply` came to be caught on the hub and not here (#126). The corpus in
+    `schema/methods.json` carries the verdict the TypeScript walker gives each case, so a rule added
+    to one side and forgotten on the other fails this test instead of shipping as a hole.
+    """
+    cases = json.loads(SCHEMA.read_text())["policy_walk_cases"]
+    assert len(cases) > 10, "run pnpm --filter @hearth/shared export:jsonschema first"
+    for case in cases:
+        assert find_policy_violations(case["config"]) == case["violations"], case["name"]
+
+
+def test_a_lock_hiding_in_scene_data_is_found() -> None:
+    """Mirror of the policy.test.ts cases for #126."""
+    apply_lock = {"actions": [{"action": "scene.apply", "data": {"entities": {"lock.front_door": {"state": "unlocked"}}}}]}
+    assert any("lock.front_door" in x for x in find_policy_violations(apply_lock))
+    assert len(find_policy_violations({"actions": [{"action": "scene.create", "snapshot_entities": ["lock.front_door"]}]})) == 1
+    assert find_policy_violations({"actions": [{"action": "scene.apply", "data": {"entities": {"light.lamp": {"state": "on"}}}}]}) == []
+
+
+def test_a_device_action_in_a_denied_domain_is_refused() -> None:
+    v = find_policy_violations({"actions": [{"device_id": "abc", "domain": "lock", "type": "unlock"}]})
+    assert v == ["config.actions[0]: device in denied domain lock"]
+    assert len(find_policy_violations({"triggers": [{"trigger": "device", "device_id": "a", "domain": "lock", "type": "locked"}]})) == 1
+    assert find_policy_violations({"actions": [{"device_id": "abc", "domain": "light", "type": "turn_on"}]}) == []
+
+
+def test_an_automation_is_never_triggered_or_flipped_from_a_config() -> None:
+    for action in ("automation.trigger", "automation.turn_on", "automation.turn_off", "automation.toggle"):
+        assert len(find_policy_violations({"actions": [{"action": action}]})) == 1
+    assert find_policy_violations({"actions": [{"action": "automation.reload"}]}) == []
