@@ -237,3 +237,70 @@ async def test_refuses_a_script_that_turns_on_a_scene_setting_a_lock(core: HomeA
     # A scene of lights is the ordinary case and must still be writable.
     fine = {"alias": "Film time", "sequence": [{"action": "scene.turn_on", "target": {"entity_id": "scene.movie_night"}}]}
     assert (await d.dispatch("scripts.validate", {"key": "film_time", "config": fine}))["ok"] is True
+
+
+async def test_labels_a_routine_as_a_hearth_scene_and_reports_it(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    A scene with steps is stored as a **labelled script** (AgDR-0044), so saving one has to put the
+    label on, and the lists have to say which routines carry it — that is how the Scenes tab knows a
+    script belongs in it.
+    """
+    from custom_components.hearth_ai import labels as hl
+
+    await hl.async_ensure_labels(core)
+    d = build_dispatcher(core)
+    config = {"alias": "Evening", "sequence": [{"action": "input_boolean.turn_on", "target": {"entity_id": "input_boolean.test"}}]}
+
+    created = await d.dispatch("scripts.create", {"key": "evening", "config": config, "hearth_scene": True})
+    await core.async_block_till_done()
+    entity_id = created["entity_id"]
+    assert entity_id and hl.is_hearth_scene(core, entity_id)
+    listed = await d.dispatch("scripts.list", {})
+    assert next(s for s in listed if s["entity_id"] == entity_id)["hearth_scene"] is True
+
+    # Absent means leave it alone: an ordinary save must not silently take the label off.
+    await d.dispatch("scripts.update", {"id": "evening", "config": config})
+    await core.async_block_till_done()
+    assert hl.is_hearth_scene(core, entity_id) is True
+
+    # And false takes it off, which is how a scene stops being one.
+    await d.dispatch("scripts.update", {"id": "evening", "config": config, "hearth_scene": False})
+    await core.async_block_till_done()
+    assert hl.is_hearth_scene(core, entity_id) is False
+
+    # An automation carries it too: that is a scene's schedule.
+    auto = await d.dispatch("automations.create", {"config": AUTOMATION, "hearth_scene": True})
+    await core.async_block_till_done()
+    assert hl.is_hearth_scene(core, auto["entity_id"])
+    rows = await d.dispatch("automations.list", {})
+    assert next(a for a in rows if a["entity_id"] == auto["entity_id"])["hearth_scene"] is True
+
+
+async def test_switches_an_automation_on_and_off_without_ever_running_it(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    `automations.set_enabled` is the one place Hearth touches an automation's state (AgDR-0044).
+
+    Two things matter and neither is the happy path: it must never *trigger* the automation, and it
+    must refuse an automation Hearth cannot edit — one from a package or a blueprint is the owner's
+    own arrangement, not Hearth's to switch.
+    """
+    d = build_dispatcher(core)
+    created = await d.dispatch("automations.create", {"config": AUTOMATION})
+    await core.async_block_till_done()
+    key, entity_id = created["id"], created["entity_id"]
+
+    triggered = async_mock_service(core, "input_boolean", "turn_off")
+
+    off = await d.dispatch("automations.set_enabled", {"id": key, "enabled": False})
+    await core.async_block_till_done()
+    assert off["state"] == "off"
+    on = await d.dispatch("automations.set_enabled", {"id": key, "enabled": True})
+    await core.async_block_till_done()
+    assert on["state"] == "on"
+    assert on["entity_id"] == entity_id
+    # Switching a rule is not running it.
+    assert triggered == []
+
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("automations.set_enabled", {"id": "not-in-our-file", "enabled": False})
+    assert ei.value.code == "not_found"

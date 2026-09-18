@@ -105,6 +105,9 @@ CAPABILITY_FOR_METHOD: dict[str, str] = {
     "automations.create": "automations.write",
     "automations.update": "automations.write",
     "automations.delete": "automations.write",
+    # Switching a rule on or off is a write to an automation, not a new kind of reach: no new
+    # capability, so no CAPABILITIES_VERSION bump (AgDR-0044).
+    "automations.set_enabled": "automations.write",
     "scenes.list": "scenes.read",
     "scenes.get": "scenes.read",
     "scenes.create": "scenes.write",

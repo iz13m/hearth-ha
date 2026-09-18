@@ -65,6 +65,7 @@ ALLOWED_METHODS: frozenset[str] = frozenset(
         "automations.create",
         "automations.update",
         "automations.delete",
+        "automations.set_enabled",
         "scenes.list",
         "scenes.get",
         "scenes.create",

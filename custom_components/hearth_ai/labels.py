@@ -38,12 +38,25 @@ ROLES: dict[str, str] = {
     "diagnostic": "Hearth: diagnostic",
     "hide": "Hearth: hide",
 }
+ROUTINE_ROLES: dict[str, str] = {"scene": "Hearth: scene"}
+"""Labels that say what a routine *is*, not how an entity is presented.
+
+`Hearth: scene` marks a script the Scenes tab should show as a scene, which is what a scene with
+steps becomes (AgDR-0044). Deliberately **not** in `ROLES`: `roles_of` feeds `hearth_labels`, which
+the hub resolves into a presentation for a *device*, and a routine label has no meaning there. An
+owner may also put this label on a script they wrote themselves, which is the whole reason it is an
+ordinary Home Assistant label rather than a flag in Hearth's own storage.
+"""
+
+ALL_LABELS: dict[str, str] = {**ROLES, **ROUTINE_ROLES}
+
 DESCRIPTIONS: dict[str, str] = {
     "tile": "Hearth app: show this as its own tile. A setting stays an admin's to change.",
     "read_only": "Hearth app: show this, but nobody can change it from the app.",
     "setting": "Hearth app: treat this as one of its device's settings, changed by admins only.",
     "diagnostic": "Hearth app: treat this as a reading about its device, never changed from the app.",
     "hide": "Hearth app: do not show this in the app. Assistants still see what Assist shares.",
+    "scene": "Hearth app: show this script in Scenes. A scene with steps or a schedule is a script.",
 }
 ICON = "mdi:home-heart"
 
@@ -75,7 +88,7 @@ async def async_ensure_labels(hass: HomeAssistant) -> None:
         stored = dict(await store.async_load() or {})
         reg = lr.async_get(hass)
         changed = False
-        for role, name in ROLES.items():
+        for role, name in ALL_LABELS.items():
             label_id = stored.get(role)
             if label_id and reg.async_get_label(label_id) is not None:
                 continue
@@ -99,12 +112,53 @@ async def async_ensure_labels(hass: HomeAssistant) -> None:
 
 @callback
 def role_of(hass: HomeAssistant, label_id: str) -> str | None:
-    """The Hearth role a label id stands for, or None when it is not a Hearth label."""
+    """The Hearth **presentation** role a label id stands for, or None.
+
+    A routine label is not one: it says what a script is, not how an entity is shown, and letting it
+    through here would put `scene` in `hearth_labels` for the hub to resolve as a placement.
+    """
     for role, stored_id in _stored(hass).items():
         if stored_id == label_id:
-            return role
+            return role if role in ROLES else None
     label = lr.async_get(hass).async_get_label(label_id)
     return _NAMES.get(label.normalized_name) if label is not None else None
+
+
+@callback
+def label_id_for(hass: HomeAssistant, role: str) -> str | None:
+    """The stored id of one Hearth label, or the id of a label with that exact name."""
+    if stored_id := _stored(hass).get(role):
+        return stored_id
+    name = ALL_LABELS.get(role)
+    label = lr.async_get(hass).async_get_label_by_name(name) if name else None
+    return label.label_id if label is not None else None
+
+
+@callback
+def is_hearth_scene(hass: HomeAssistant, entity_id: str) -> bool:
+    """Whether this routine carries `Hearth: scene`.
+
+    Read from the entity registry, so a script the owner labelled by hand in Home Assistant counts
+    exactly as one Hearth labelled itself.
+    """
+    label_id = label_id_for(hass, "scene")
+    if not label_id:
+        return False
+    entry = er.async_get(hass).async_get(entity_id)
+    return bool(entry and label_id in (entry.labels or set()))
+
+
+async def async_mark_hearth_scene(hass: HomeAssistant, entity_id: str, wanted: bool) -> None:
+    """Put `Hearth: scene` on a routine, or take it off. Silent when the label does not exist yet."""
+    label_id = label_id_for(hass, "scene")
+    reg = er.async_get(hass)
+    entry = reg.async_get(entity_id) if label_id else None
+    if not label_id or entry is None:
+        return
+    labels = set(entry.labels or set())
+    if wanted == (label_id in labels):
+        return
+    reg.async_update_entity(entity_id, labels=labels | {label_id} if wanted else labels - {label_id})
 
 
 @callback
@@ -167,7 +221,10 @@ class RegistryWatcher:
             self._task.cancel()
 
     def _touches(self, label_ids: Iterable[str]) -> bool:
-        return any(role_of(self._hass, label_id) for label_id in label_ids)
+        # Any Hearth label, presentation or routine: a script gaining `Hearth: scene` changes what
+        # the Scenes tab holds, which the app should see as soon as a presentation change.
+        routine_ids = {label_id_for(self._hass, role) for role in ROUTINE_ROLES}
+        return any(role_of(self._hass, label_id) or label_id in routine_ids for label_id in label_ids)
 
     @callback
     def _on_entity(self, event: Event[Any]) -> None:
@@ -193,7 +250,7 @@ class RegistryWatcher:
     def _on_label(self, event: Event[Any]) -> None:
         # A rename can make a label start or stop being a Hearth one; a delete of one of ours matters
         # too, and by then only its stored id says it was ours.
-        if role_of(self._hass, event.data["label_id"]):
+        if self._touches({event.data["label_id"]}):
             self._schedule()
 
     @callback

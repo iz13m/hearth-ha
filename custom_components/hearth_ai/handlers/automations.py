@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
+from ..labels import async_mark_hearth_scene, is_hearth_scene
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
@@ -83,6 +84,8 @@ async def automations_list(hass: HomeAssistant, params: dict[str, Any]) -> list[
                 "state": state.state,
                 "last_triggered": (lt.isoformat() if (lt := state.attributes.get("last_triggered")) else None),
                 "editable": bool(auto_id) and str(auto_id) in file_ids,
+                # `Hearth: scene` — this automation is a scene's schedule (AgDR-0044).
+                "hearth_scene": is_hearth_scene(hass, state.entity_id),
             }
         )
     return out
@@ -105,7 +108,15 @@ async def automations_validate(hass: HomeAssistant, params: dict[str, Any]) -> d
     return await _validate(hass, "validate", config)
 
 
-async def _save(hass: HomeAssistant, key: str, config: dict[str, Any], *, must_exist: bool) -> dict[str, Any]:
+def _hearth_scene(params: dict[str, Any]) -> bool | None:
+    """Whether to label this routine a Hearth scene. Absent means leave the label as it is."""
+    value = params.get("hearth_scene")
+    return bool(value) if value is not None else None
+
+
+async def _save(
+    hass: HomeAssistant, key: str, config: dict[str, Any], *, must_exist: bool, hearth_scene: bool | None = None
+) -> dict[str, Any]:
     config.pop(CONF_ID, None)
     result = await _validate(hass, key, config)
     if not result["ok"]:
@@ -119,15 +130,51 @@ async def _save(hass: HomeAssistant, key: str, config: dict[str, Any], *, must_e
         _write_value(data, key, config)
         await write_yaml(hass, path, data)
     await hass.services.async_call(AUTOMATION_DOMAIN, SERVICE_RELOAD, {CONF_ID: key}, blocking=True)
-    return {"id": key, "entity_id": _entity_id(hass, key)}
+    entity_id = _entity_id(hass, key)
+    # After the reload, because a new automation has no registry entry until it exists.
+    if hearth_scene is not None and entity_id:
+        await async_mark_hearth_scene(hass, entity_id, hearth_scene)
+    return {"id": key, "entity_id": entity_id}
 
 
 async def automations_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
-    return await _save(hass, uuid.uuid4().hex, require_config(params), must_exist=False)
+    return await _save(hass, uuid.uuid4().hex, require_config(params), must_exist=False, hearth_scene=_hearth_scene(params))
 
 
 async def automations_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
-    return await _save(hass, require_str(params, "id"), require_config(params), must_exist=True)
+    return await _save(hass, require_str(params, "id"), require_config(params), must_exist=True, hearth_scene=_hearth_scene(params))
+
+
+async def automations_set_enabled(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
+    """
+    Switch one automation on or off. The **only** place Hearth touches an automation's state.
+
+    It is not a way to run one: `automation.trigger` is in `DENIED_ACTIONS` and always will be
+    (AgDR-0042), and `turn_off` is called with `stop_actions: false` so switching a rule off never
+    interrupts a sequence already part-way through. A scene's schedule is an automation (AgDR-0044),
+    and turning the schedule off without deleting it is the thing a person actually wants.
+
+    Scoped to automations in `automations.yaml`: those are the ones Hearth wrote or could write, and
+    an automation from a package or a blueprint elsewhere is the owner's own arrangement.
+    """
+    key = require_str(params, "id")
+    enabled = bool(params.get("enabled"))
+    path = _path(hass)
+    async with lock_for(path):
+        data = await read_yaml(hass, path, [])
+    if not any(isinstance(item, dict) and str(item.get(CONF_ID)) == key for item in data):
+        raise RpcError("not_found", f"no editable automation with id {key}")
+    entity_id = _entity_id(hass, key)
+    if not entity_id:
+        raise RpcError("not_found", f"automation {key} has no entity yet")
+    await hass.services.async_call(
+        AUTOMATION_DOMAIN,
+        "turn_on" if enabled else "turn_off",
+        {"entity_id": entity_id} if enabled else {"entity_id": entity_id, "stop_actions": False},
+        blocking=True,
+    )
+    state = hass.states.get(entity_id)
+    return {"id": key, "entity_id": entity_id, "state": state.state if state else None}
 
 
 async def automations_delete(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
@@ -153,3 +200,4 @@ def register(d: Dispatcher) -> None:
     d.register("automations.create", automations_create)
     d.register("automations.update", automations_update)
     d.register("automations.delete", automations_delete)
+    d.register("automations.set_enabled", automations_set_enabled)

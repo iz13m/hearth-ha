@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
@@ -215,3 +216,46 @@ async def test_a_command_that_changes_nothing_still_answers(core: HomeAssistant)
         timeout=control.SETTLE_TIMEOUT_S + 5,
     )
     assert result["entities"] == [{"entity_id": TEST, "state": "off"}]
+
+
+async def test_a_script_hearth_presents_as_a_scene_is_checked_when_it_runs(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    The run-time half of #126, which that change left to this one.
+
+    A scene is checked when it runs (AgDR-0012); a script is not (AgDR-0005). So a scene stored as a
+    labelled script would have been the one way to spend an unchecked run on scene-shaped contents.
+    The check is on the label, so it narrows what a labelled script may do and leaves every other
+    script exactly as AgDR-0005 describes.
+    """
+    from custom_components.hearth_ai import labels as hl
+
+    await hl.async_ensure_labels(core)
+    core.states.async_set("scene.open_the_gate", "unknown", {"friendly_name": "Open the gate", "entity_id": ["lock.gate"]})
+    d = build_dispatcher(core)
+
+    # Written before the label exists on it, so the authoring check does not catch it — which is
+    # exactly the case a hand-labelled script, or a script written by an older Hearth, would be in.
+    scripts_yaml = tmp_path / "scripts.yaml"
+    scripts_yaml.write_text("let_me_in:\n  alias: Let me in\n  sequence:\n  - action: scene.turn_on\n    target:\n      entity_id: scene.open_the_gate\n")
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+
+    async_expose_entity(core, "conversation", "script.let_me_in", True)
+
+    # Unlabelled, it runs: a script is the owner's own sequence (AgDR-0005).
+    assert (await d.dispatch("scripts.run", {"entity_id": "script.let_me_in"}))["entity_id"] == "script.let_me_in"
+
+    # Labelled as a Hearth scene, its contents are checked and the lock stops it.
+    await hl.async_mark_hearth_scene(core, "script.let_me_in", True)
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("scripts.run", {"entity_id": "script.let_me_in"})
+    assert ei.value.code == "method_not_allowed"
+    assert "lock.gate" in ei.value.message
+
+    # A labelled script of ordinary actions still runs.
+    scripts_yaml.write_text("film_time:\n  alias: Film time\n  sequence:\n  - action: input_boolean.turn_on\n    target:\n      entity_id: input_boolean.test\n")
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+    async_expose_entity(core, "conversation", "script.film_time", True)
+    await hl.async_mark_hearth_scene(core, "script.film_time", True)
+    assert (await d.dispatch("scripts.run", {"entity_id": "script.film_time"}))["entity_id"] == "script.film_time"

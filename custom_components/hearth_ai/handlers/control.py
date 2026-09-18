@@ -13,11 +13,13 @@ from typing import Any
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant
 from homeassistant.helpers.event import async_track_state_change_event
 
+from ..labels import is_hearth_scene
 from ..policy import find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .registry import _exposed
 from .scenes import scene_run_violations
+from .scripts import script_run_violations
 
 # Service calls can legitimately take a while (thermostats, media players); scripts return
 # as soon as they start.
@@ -159,7 +161,17 @@ async def scripts_run(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, 
     Runs whatever the user wrote in that script — including actions Hearth itself may not perform.
     That is a deliberate, documented decision (AgDR-0005), unlike scenes: a script is a sequence the
     owner authored and exposed, and the options UI says so plainly. Exposure is still required.
+
+    **Except a script Hearth presents as a scene.** A scene with steps is stored as a labelled
+    script (AgDR-0044), and a scene is checked when it runs (AgDR-0012) — so storing one as a script
+    must not be the way that check is lost. AgDR-0005's licence covers a script the owner reaches as
+    a script, not one the app offers in the Scenes tab. The label is the owner's own, so putting it
+    on a script *narrows* what that script may do, which is the safe direction for a label to work in.
     """
+    entity_id = require_str(params, "entity_id")
+    # Short-circuited on the label, so an ordinary script pays neither the file read nor the walk.
+    if is_hearth_scene(hass, entity_id) and (violations := await script_run_violations(hass, entity_id)):
+        raise RpcError("method_not_allowed", "; ".join(violations))
     return await _run_entity(hass, params, "script")
 
 

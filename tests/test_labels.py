@@ -33,8 +33,8 @@ async def _reload(hass: HomeAssistant) -> None:
 
 async def test_creates_the_five_labels(core: HomeAssistant) -> None:
     await hl.async_ensure_labels(core)
-    assert _hearth(core) == sorted(hl.ROLES.values())
-    assert set(_ids(core)) == set(hl.ROLES)
+    assert _hearth(core) == sorted(hl.ALL_LABELS.values())
+    assert set(_ids(core)) == set(hl.ALL_LABELS)
 
 
 async def test_is_idempotent_across_setups(core: HomeAssistant) -> None:
@@ -43,7 +43,7 @@ async def test_is_idempotent_across_setups(core: HomeAssistant) -> None:
     await _reload(core)
     await hl.async_ensure_labels(core)
     assert _ids(core) == first
-    assert len(_hearth(core)) == 5
+    assert len(_hearth(core)) == len(hl.ALL_LABELS)
 
 
 async def test_adopts_a_label_the_owner_already_made(core: HomeAssistant) -> None:
@@ -51,8 +51,8 @@ async def test_adopts_a_label_the_owner_already_made(core: HomeAssistant) -> Non
     await hl.async_ensure_labels(core)
     assert _ids(core)["hide"] == mine.label_id
     # The owner's lowercase one does not start with "Hearth:", and no second one was made beside it.
-    assert len(_hearth(core)) == 4
-    assert len(lr.async_get(core).async_list_labels()) == 5
+    assert len(_hearth(core)) == len(hl.ALL_LABELS) - 1
+    assert len(lr.async_get(core).async_list_labels()) == len(hl.ALL_LABELS)
 
 
 async def test_survives_a_rename(core: HomeAssistant) -> None:
@@ -88,8 +88,8 @@ async def test_a_creation_race_adopts_the_winner(core: HomeAssistant) -> None:
 
     with patch.object(reg, "async_create", side_effect=racing):
         await hl.async_ensure_labels(core)
-    assert set(_ids(core)) == set(hl.ROLES)
-    assert len(_hearth(core)) == 5
+    assert set(_ids(core)) == set(hl.ALL_LABELS)
+    assert len(_hearth(core)) == len(hl.ALL_LABELS)
 
 
 async def test_never_fails_setup(core: HomeAssistant) -> None:
@@ -254,3 +254,38 @@ async def test_watcher_swallows_an_older_hubs_refusal(core: HomeAssistant) -> No
         assert sink.count == 2
     finally:
         w.stop()
+
+
+async def test_the_routine_label_is_not_a_presentation_role(core: HomeAssistant) -> None:
+    """
+    `Hearth: scene` says what a routine *is*, not how an entity is drawn (AgDR-0044).
+
+    It is created like the other five so an owner can pick it in Home Assistant's own UI, but it
+    must never reach `hearth_labels`: the hub resolves those into a placement for a device, and a
+    routine label has no meaning there — it would arrive as an unknown role and, worse, one that
+    sorts into the precedence chain.
+    """
+    await hl.async_ensure_labels(core)
+    scene_id = _ids(core)["scene"]
+
+    assert hl.role_of(core, scene_id) is None
+    assert hl.roles_of(core, [scene_id]) == []
+    assert hl.label_id_for(core, "scene") == scene_id
+    # And a presentation label is still resolved, so the exclusion is not a blanket one.
+    assert hl.role_of(core, _ids(core)["tile"]) == "tile"
+
+
+async def test_marks_and_unmarks_a_routine_as_a_hearth_scene(core: HomeAssistant) -> None:
+    """The label is an ordinary HA label on the entity, so an owner can apply it by hand too."""
+    await hl.async_ensure_labels(core)
+    reg = er.async_get(core)
+    entry = reg.async_get_or_create("script", "script", "gate", suggested_object_id="gate")
+
+    assert hl.is_hearth_scene(core, entry.entity_id) is False
+    await hl.async_mark_hearth_scene(core, entry.entity_id, True)
+    assert hl.is_hearth_scene(core, entry.entity_id) is True
+    # Labels the owner put there for their own dashboards are left alone.
+    reg.async_update_entity(entry.entity_id, labels=reg.async_get(entry.entity_id).labels | {"mine"})
+    await hl.async_mark_hearth_scene(core, entry.entity_id, False)
+    assert hl.is_hearth_scene(core, entry.entity_id) is False
+    assert "mine" in reg.async_get(entry.entity_id).labels

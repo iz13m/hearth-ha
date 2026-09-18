@@ -128,3 +128,17 @@ def test_reported_version_matches_the_manifest() -> None:
     manifest = json.loads((Path(__file__).resolve().parents[1] / "custom_components" / "hearth_ai" / "manifest.json").read_text())
     assert INTEGRATION_VERSION == manifest["version"]
     assert INTEGRATION_VERSION.count(".") == 2
+
+
+def test_switching_an_automation_is_a_write_and_not_a_new_capability() -> None:
+    """
+    `automations.set_enabled` (AgDR-0044) sits under the capability that already means "may change
+    this home's automations". A new capability would have needed a `CAPABILITIES_VERSION` bump and a
+    new switch in the options flow for something that is not a new kind of reach — and it would have
+    let a household grant "may disable my rules" without granting "may rewrite them", which is the
+    weaker of the two, not the stronger.
+    """
+    assert "automations.set_enabled" in ALLOWED_METHODS
+    assert CAPABILITY_FOR_METHOD["automations.set_enabled"] == "automations.write"
+    # Still never a way to run one: that is the line AgDR-0042 drew.
+    assert "automations.trigger" not in ALLOWED_METHODS

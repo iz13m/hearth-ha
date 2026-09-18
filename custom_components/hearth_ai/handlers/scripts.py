@@ -16,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.util import slugify
 
+from ..labels import async_mark_hearth_scene, is_hearth_scene
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
@@ -31,6 +32,12 @@ def _path(hass: HomeAssistant) -> str:
 
 def _entity_id(hass: HomeAssistant, key: str) -> str | None:
     return er.async_get(hass).async_get_entity_id(SCRIPT_DOMAIN, SCRIPT_DOMAIN, key)
+
+
+def _hearth_scene(params: dict[str, Any]) -> bool | None:
+    """Whether to label this routine a Hearth scene. Absent means leave the label as it is."""
+    value = params.get("hearth_scene")
+    return bool(value) if value is not None else None
 
 
 def _check_key(key: str) -> str:
@@ -73,9 +80,37 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
                 "editable": key in file_keys,
                 # Listed either way: an un-exposed script can still be read and edited, just not run.
                 "can_run": _exposed(hass, state.entity_id),
+                # `Hearth: scene` — this script is a scene with steps or a schedule (AgDR-0044).
+                "hearth_scene": is_hearth_scene(hass, state.entity_id),
             }
         )
     return out
+
+
+async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
+    """
+    Why a script Hearth presents as a scene may not run. Empty means it may.
+
+    The run-time half of #126, which that change deliberately left to this one. A scene is checked
+    when it runs (AgDR-0012); a script is not (AgDR-0005). So a scene stored as a labelled script
+    would have been the one way to spend an unchecked run on scene-shaped contents — the same hole
+    `find_nested_scene_violations` closed at *authoring* time, from the other end.
+
+    **Bounded by what can be read.** A script in `scripts.yaml` is checked whole. A script the owner
+    wrote somewhere Hearth cannot read — a package, a blueprint — has no config here, so nothing is
+    found and it runs exactly as AgDR-0005 always let a script run. That is not a new hole: labelling
+    such a script grants it nothing it could not already do through `scripts.run`.
+    """
+    key = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    path = _path(hass)
+    async with lock_for(path):
+        data = await read_yaml(hass, path, {})
+    config = plain(data[key]) if isinstance(data, dict) and key in data else None
+    if config is None:
+        return []
+    problems = find_policy_violations(config) + find_reference_violations(config, "config")
+    problems += await find_nested_scene_violations(hass, config)
+    return list(dict.fromkeys(problems))
 
 
 async def scripts_get(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
@@ -93,7 +128,9 @@ async def scripts_validate(hass: HomeAssistant, params: dict[str, Any]) -> dict[
     return await _validate(hass, key, require_config(params))
 
 
-async def _save(hass: HomeAssistant, key: str, config: dict[str, Any], *, must_exist: bool) -> dict[str, Any]:
+async def _save(
+    hass: HomeAssistant, key: str, config: dict[str, Any], *, must_exist: bool, hearth_scene: bool | None = None
+) -> dict[str, Any]:
     result = await _validate(hass, key, config)
     if not result["ok"]:
         raise RpcError("validation_failed", result.get("error") or "invalid script", {"status": result.get("status")})
@@ -107,7 +144,11 @@ async def _save(hass: HomeAssistant, key: str, config: dict[str, Any], *, must_e
         data[key] = config
         await write_yaml(hass, path, data)
     await hass.services.async_call(SCRIPT_DOMAIN, SERVICE_RELOAD, blocking=True)
-    return {"id": key, "entity_id": _entity_id(hass, key)}
+    entity_id = _entity_id(hass, key)
+    # After the reload, because a new script has no registry entry until it exists.
+    if hearth_scene is not None and entity_id:
+        await async_mark_hearth_scene(hass, entity_id, hearth_scene)
+    return {"id": key, "entity_id": entity_id}
 
 
 async def scripts_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
@@ -124,11 +165,13 @@ async def scripts_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
             key = f"{base}_{n}"
             n += 1
     key = _check_key(str(key))
-    return await _save(hass, key, config, must_exist=False)
+    return await _save(hass, key, config, must_exist=False, hearth_scene=_hearth_scene(params))
 
 
 async def scripts_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
-    return await _save(hass, _check_key(require_str(params, "id")), require_config(params), must_exist=True)
+    return await _save(
+        hass, _check_key(require_str(params, "id")), require_config(params), must_exist=True, hearth_scene=_hearth_scene(params)
+    )
 
 
 async def scripts_delete(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
