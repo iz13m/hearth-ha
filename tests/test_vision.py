@@ -137,7 +137,9 @@ async def test_lists_cameras_but_entities_list_stays_blind_to_them(core: HomeAss
 
     listed = await d.dispatch("vision.list", {})
     assert [c["entity_id"] for c in listed] == ["camera.garden", "camera.porch"]
-    assert listed[1] == {"entity_id": porch, "name": "Porch", "area_id": None, "device_name": None, "state": "idle", "hearth_labels": {"entity": [], "device": []}}
+    # `live` is False for every camera here: this venv cannot import the camera component at all, and
+    # a box that cannot ask whether a camera does WebRTC must not offer it (AgDR-0045).
+    assert listed[1] == {"entity_id": porch, "name": "Porch", "area_id": None, "device_name": None, "state": "idle", "live": False, "hearth_labels": {"entity": [], "device": []}}
     everything = await d.dispatch("entities.list", {"limit": 500})
     assert not any(e["entity_id"].startswith("camera.") for e in everything)
 

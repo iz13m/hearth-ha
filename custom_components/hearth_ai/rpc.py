@@ -36,6 +36,10 @@ ALLOWED_METHODS: frozenset[str] = frozenset(
         "access.operate",
         "vision.list",
         "vision.snapshot",
+        "vision.webrtc_config",
+        "vision.webrtc_offer",
+        "vision.webrtc_candidate",
+        "vision.webrtc_close",
         "entities.list",
         "states.get",
         "states.history",
@@ -149,6 +153,11 @@ class Dispatcher:
         cap = CAPABILITY_FOR_METHOD[method]
         if self._capabilities is not None and cap not in self._capabilities:
             raise RpcError("method_not_allowed", f"{cap} is disabled in the Hearth AI options")
+        # Live video is strictly more than a still, and the list of cameras it draws from comes from
+        # `vision.list`. "Live on, stills off" is a state nobody designed for, so it is refused here
+        # rather than left to produce something stranger further in (AgDR-0045).
+        if cap == "vision.live" and self._capabilities is not None and "vision.view" not in self._capabilities:
+            raise RpcError("method_not_allowed", "vision.live needs vision.view, which is disabled in the Hearth AI options")
         handler = self._handlers.get(method)
         if handler is None:
             raise RpcError("method_not_allowed", f"method not implemented: {method}")
@@ -169,7 +178,7 @@ class Dispatcher:
 
 def build_dispatcher(hass: HomeAssistant, capabilities: frozenset[str] | None = None) -> Dispatcher:
     """Create the dispatcher with every handler registered (gating happens at dispatch)."""
-    from .handlers import access, areas, automations, control, exposure, helpers, history, integrations, notify, organise, registry, scenes, scripts, vision  # noqa: PLC0415
+    from .handlers import access, areas, automations, control, exposure, helpers, history, integrations, live, notify, organise, registry, scenes, scripts, vision  # noqa: PLC0415
 
     d = Dispatcher(hass, capabilities)
     registry.register(d)
@@ -179,6 +188,7 @@ def build_dispatcher(hass: HomeAssistant, capabilities: frozenset[str] | None = 
     notify.register(d)
     access.register(d)
     vision.register(d)
+    live.register(d)
     areas.register(d)
     exposure.register(d)
     control.register(d)

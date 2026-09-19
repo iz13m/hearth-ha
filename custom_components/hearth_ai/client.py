@@ -156,6 +156,12 @@ class HearthClient:
                 self._watcher.stop()
                 self._ws = None
                 self._fail_pending("connection closed")
+                # Nobody can be watching a camera through a hub we have lost, and a live session left
+                # open holds a go2rtc consumer and the camera's upstream for as long as it lasts
+                # (AgDR-0045).
+                from .handlers.live import close_all  # noqa: PLC0415
+
+                await close_all(self._hass)
                 for t in list(self.inflight):
                     t.cancel()
 

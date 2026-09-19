@@ -48,6 +48,7 @@ async def test_menu_and_capabilities(hass: HomeAssistant, entry: MockConfigEntry
         "cap_entities_manage",
         "cap_access_control",
         "cap_vision_view",
+        "cap_vision_live",
         "cap_services_read",
         "cap_automations_read",
         "cap_automations_write",

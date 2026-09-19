@@ -133,7 +133,40 @@ async def vision_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
         )
         if len(rows) >= limit:
             break
+    _mark_live(hass, rows)
     return rows
+
+
+def _mark_live(hass: HomeAssistant, rows: list[dict[str, Any]]) -> None:
+    """Say which of these can be watched live (AgDR-0045), so the app draws no button that cannot work.
+
+    Not every camera can: go2rtc has to understand how the camera carries its video, and Home
+    Assistant says so through `camera_capabilities.frontend_stream_types`. Asked per camera rather
+    than assumed, and never fatal — a camera we cannot ask about is simply not offered live.
+
+    The import is inside the `if`, not just inside the function: a home with no cameras may have no
+    `turbojpeg`, and it must still be able to list that it has none.
+    """
+    for row in rows:
+        row["live"] = False
+    if not rows:
+        return
+    try:
+        from homeassistant.components.camera import StreamType  # noqa: PLC0415
+        from homeassistant.components.camera.helper import get_camera_from_entity_id  # noqa: PLC0415
+    except ImportError:
+        # A box whose camera component will not import cannot negotiate live video either, and must
+        # still be able to *list* what it has. Listing is what the app draws the tiles from.
+        return
+
+    for row in rows:
+        live = False
+        try:
+            cam = get_camera_from_entity_id(hass, row["entity_id"])
+            live = StreamType.WEB_RTC in cam.camera_capabilities.frontend_stream_types
+        except Exception:  # noqa: BLE001 — a camera that is off, or gone, is one we cannot offer live
+            live = False
+        row["live"] = live
 
 
 def _normalise(content: bytes, width: int, height: int) -> tuple[bytes, int, int]:

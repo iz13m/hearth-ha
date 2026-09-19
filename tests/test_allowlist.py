@@ -90,12 +90,25 @@ def test_control_is_limited_to_opt_in_methods() -> None:
         "access.operate",
         "vision.list",
         "vision.snapshot",
+        "vision.webrtc_config",
+        "vision.webrtc_offer",
+        "vision.webrtc_candidate",
+        "vision.webrtc_close",
     }
     # Methods that deliberately reach a sensitive domain. The list is the point of the check, not a
     # hole in it: the guard catches a method that *accidentally* names one, so a deliberate one has
     # to be written here, which forces the decision rather than letting it slip in. Both have a
     # record (AgDR-0025) and both are app-only on the hub side.
-    reviewed = {"access.list", "access.operate", "vision.list", "vision.snapshot"}
+    reviewed = {
+        "access.list",
+        "access.operate",
+        "vision.list",
+        "vision.snapshot",
+        "vision.webrtc_config",
+        "vision.webrtc_offer",
+        "vision.webrtc_candidate",
+        "vision.webrtc_close",
+    }
     for m in ALLOWED_METHODS:
         if m in reviewed:
             continue

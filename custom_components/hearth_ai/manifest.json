@@ -19,5 +19,5 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/iz13m/hearth-ha/issues",
   "requirements": [],
-  "version": "0.24.2"
+  "version": "0.25.0"
 }
