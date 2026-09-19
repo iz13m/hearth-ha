@@ -35,7 +35,7 @@ from .const import (
     RECONNECT_MIN_S,
 )
 from .rpc import Dispatcher, RpcError
-from .labels import RegistryWatcher
+from .labels import DATA_NOTIFY, RegistryWatcher
 from .subscriber import StateSubscriber
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,6 +69,9 @@ class HearthClient:
         # Tells the hub when an owner changes a Hearth label (AgDR-0034). Not capability-gated: it
         # carries nothing, and the hub can only re-read what the owner already lets it read.
         self._watcher = RegistryWatcher(hass, self._registry_changed)
+        # So a local change with no label behind it — a Hearth panel save (AgDR-0046) — reaches the
+        # same "this home looks different" path the labels already use.
+        hass.data[DATA_NOTIFY] = lambda: hass.loop.create_task(self._registry_changed())
         self._pending: dict[str, asyncio.Future[Any]] = {}
         self._stopping = False
         self.connected = False
@@ -85,6 +88,7 @@ class HearthClient:
 
     async def stop(self) -> None:
         self._stopping = True
+        self._hass.data.pop(DATA_NOTIFY, None)
         if self._ws is not None and not self._ws.closed:
             await self._ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"unloading")
         if self._task is not None:

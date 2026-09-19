@@ -83,6 +83,9 @@ CAPABILITY_FOR_METHOD: dict[str, str] = {
     "areas.assign": "areas.manage",
     "entities.list": "entities.read",
     "states.get": "entities.read",
+    # Hearth's own arrangement, not the home (AgDR-0046). No new capability: the panel that writes
+    # it is local to Home Assistant and admin-only, and this read carries no state.
+    "presentation.get": "entities.read",
     "states.history": "entities.history",
     "helpers.types": "helpers.manage",
     "helpers.describe": "helpers.manage",

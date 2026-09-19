@@ -3,6 +3,8 @@
   "name": "Hearth AI",
   "after_dependencies": [
     "automation",
+    "frontend",
+    "panel_custom",
     "recorder",
     "scene",
     "script"
@@ -12,12 +14,13 @@
   ],
   "config_flow": true,
   "dependencies": [
-    "conversation"
+    "conversation",
+    "http"
   ],
   "documentation": "https://github.com/iz13m/hearth-ha",
   "integration_type": "service",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/iz13m/hearth-ha/issues",
   "requirements": [],
-  "version": "0.25.0"
+  "version": "0.26.0"
 }

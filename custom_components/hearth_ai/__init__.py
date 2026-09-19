@@ -11,9 +11,11 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .client import HearthClient
-from .const import CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN
+from .const import CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN, INTEGRATION_VERSION
 from .labels import async_ensure_labels
 from .options import HearthOptions
+from .panel import async_register_panel, async_unregister_panel
+from .presentation import async_load as async_load_profile
 from .rpc import build_dispatcher
 
 PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.CONVERSATION, Platform.SWITCH]
@@ -36,8 +38,13 @@ def device_info(entry: ConfigEntry) -> dr.DeviceInfo:
 
 async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bool:
     """Set up from a config entry (re-run on every options change via OptionsFlowWithReload)."""
-    # Before the client: the first `entities.list` after connecting should already know the labels.
+    # Before the client: the first `entities.list` after connecting should already know the labels,
+    # and the first `presentation.get` should not be the thing that reads the arrangement off disk.
     await async_ensure_labels(hass)
+    await async_load_profile(hass)
+    # The sidebar is local and has nothing to do with the connection, so a home whose hub is down
+    # can still be arranged — and a home that has not finished pairing can be arranged first.
+    await async_register_panel(hass, INTEGRATION_VERSION)
     options = HearthOptions.from_entry(entry)
     capabilities = options.capabilities
     dispatcher = build_dispatcher(hass, frozenset(capabilities))
@@ -70,4 +77,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bo
 async def async_unload_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bool:
     """Unload a config entry."""
     await entry.runtime_data.client.stop()
+    # Setup re-runs on every options save (OptionsFlowWithReload), and so does unload — so the panel
+    # stays registered here and only goes when the last entry is really leaving.
+    if len(hass.config_entries.async_entries(DOMAIN)) <= 1:
+        async_unregister_panel(hass)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

@@ -70,6 +70,17 @@ _NAMES: dict[str, str] = {normalize_name(name): role for role, name in ROLES.ite
 # One `registry.changed` for a burst: deleting a label touches every entity that had it.
 DEBOUNCE_S = 1.0
 
+# hass.data key for "tell the hub this home's shape changed". Set by the client while it is up, so
+# anything local — a Hearth label, a panel save — can reach the same path without holding the entry.
+DATA_NOTIFY = f"{DOMAIN}_notify_registry"
+
+
+@callback
+def async_notify_registry_changed(hass: HomeAssistant) -> None:
+    """Best effort. A home whose socket is down needs no telling: the hub re-reads on reconnect."""
+    if (notify := hass.data.get(DATA_NOTIFY)) is not None:
+        notify()
+
 
 def _stored(hass: HomeAssistant) -> dict[str, str]:
     return hass.data.get(DATA_LABEL_IDS, {})

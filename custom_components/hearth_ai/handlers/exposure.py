@@ -185,17 +185,28 @@ async def entities_expose(hass: HomeAssistant, params: dict[str, Any]) -> dict[s
     for entity_id in ids:
         if not isinstance(entity_id, str):
             raise RpcError("invalid_params", "entity_ids must be strings")
-        reason = _refusal(hass, entity_id, ent_reg, expose=expose)
+        reason = apply_exposure(hass, entity_id, expose, ent_reg)
         if reason is not None:
             refused.append({"entity_id": entity_id, "reason": reason})
             continue
-        try:
-            async_expose_entity(hass, ASSISTANT, entity_id, expose)
-        except Exception as err:  # noqa: BLE001 - one bad entity must not lose the rest
-            refused.append({"entity_id": entity_id, "reason": str(err) or "could not be changed"})
-            continue
         changed.append(entity_id)
     return {"changed": changed, "refused": refused}
+
+
+def apply_exposure(hass: HomeAssistant, entity_id: str, expose: bool, ent_reg: er.EntityRegistry) -> str | None:
+    """Share one entity with Assist, or stop. Returns why it was refused, or None on success.
+
+    The Hearth panel and the hub's `entities.expose` both go through here, so the two can never come
+    to different answers about what is off limits — which is the one rule in this file that matters.
+    """
+    reason = _refusal(hass, entity_id, ent_reg, expose=expose)
+    if reason is not None:
+        return reason
+    try:
+        async_expose_entity(hass, ASSISTANT, entity_id, expose)
+    except Exception as err:  # noqa: BLE001 - one bad entity must not lose the rest
+        return str(err) or "could not be changed"
+    return None
 
 
 def register(d: Dispatcher) -> None:
