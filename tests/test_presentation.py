@@ -157,6 +157,49 @@ async def test_refuses_a_scene_as_a_device_and_a_device_as_an_action(core: HomeA
         validate(core, as_action)
 
 
+async def test_accepts_the_control_placement(core: HomeAssistant) -> None:
+    """AgDR-0047: fold this into its own device's tile instead of giving it a tile of its own."""
+    _register(core, "switch", "soundbar_mute", device="sb")
+    _register(core, "number", "soundbar_volume", device="sb")
+    out = validate(core, {"version": 1, "entities": [{"entity_id": "number.soundbar_volume", "placement": "control"}], "tiles": []})
+    assert out["entities"] == [{"entity_id": "number.soundbar_volume", "placement": "control"}]
+
+
+async def test_a_control_on_an_off_limits_domain_is_still_refused(core: HomeAssistant) -> None:
+    """The new placement is not a way round the one boundary that is absolute."""
+    core.states.async_set("lock.front", "locked")
+    with pytest.raises(ProfileError, match="never arranges"):
+        validate(core, {"version": 1, "entities": [{"entity_id": "lock.front", "placement": "control"}], "tiles": []})
+
+
+async def test_warns_when_a_control_has_nothing_to_fold_into(core: HomeAssistant) -> None:
+    """Not a refusal — it simply keeps its tile — but an admin should not be left guessing."""
+    _register(core, "number", "amp_gain", device="amp")
+    core.states.async_set("number.template_gain", "3")
+    profile = validate(
+        core,
+        {
+            "version": 1,
+            "entities": [
+                {"entity_id": "number.amp_gain", "placement": "control"},
+                {"entity_id": "number.template_gain", "placement": "control"},
+            ],
+            "tiles": [],
+        },
+    )
+    said = " ".join(warnings(core, profile))
+    assert "only thing on its device" in said
+    assert "no device of its own" in said
+
+
+async def test_a_version_one_profile_round_trips_unchanged(core: HomeAssistant) -> None:
+    """The owner already has one on their box; this release must not rewrite or drop it."""
+    _register(core, "switch", "lamp", device="d")
+    stored = {"version": 1, "entities": [{"entity_id": "switch.lamp", "placement": "tile"}], "tiles": []}
+    await async_save(core, validate(core, stored))
+    assert (await async_load(core))["entities"] == [{"entity_id": "switch.lamp", "placement": "tile"}]
+
+
 async def test_refuses_a_placement_or_an_edit_it_does_not_know(core: HomeAssistant) -> None:
     _register(core, "switch", "lamp", device="d")
     with pytest.raises(ProfileError, match="is not a placement"):

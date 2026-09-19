@@ -29,7 +29,10 @@ STORAGE_VERSION = 1
 # hass.data key for the loaded profile, so a read costs nothing on the state path.
 DATA_PROFILE = f"{DOMAIN}_presentation"
 
-PLACEMENTS = frozenset({"tile", "read_only", "setting", "diagnostic", "hide"})
+# `control` (AgDR-0047) means "don't give this its own tile — fold it into its own device's tile as
+# a control", which is how a soundbar's volume and sound mode get to be one tap away instead of
+# buried behind the pencil. Deliberately not a sixth Hearth *label*: see `labels.py`.
+PLACEMENTS = frozenset({"tile", "control", "read_only", "setting", "diagnostic", "hide"})
 SLOTS = frozenset({"main", "reading", "setting"})
 EDITABLE = frozenset({"name", "icon", "room", "order", "hide"})
 ROUTINE_DOMAINS = frozenset({"scene", "script"})
@@ -199,6 +202,19 @@ def warnings(hass: HomeAssistant, profile: dict[str, Any]) -> list[str]:
     """
     out: list[str] = []
     reg = er.async_get(hass)
+    for row in profile["entities"]:
+        if row.get("placement") != "control":
+            continue
+        entity_id = row["entity_id"]
+        entry = reg.async_get(entity_id)
+        # A control is folded into its own device's tile, so a thing with no device has nothing to
+        # fold into and simply keeps its tile. Worth saying, rather than looking broken.
+        if entry is None or entry.device_id is None:
+            out.append(f"{entity_id} has no device of its own, so it keeps its own tile")
+            continue
+        siblings = [e for e in er.async_entries_for_device(reg, entry.device_id) if e.entity_id != entity_id]
+        if not siblings:
+            out.append(f"{entity_id} is the only thing on its device, so it stays a tile")
     for tile in profile["tiles"]:
         for member in tile["members"]:
             entry = reg.async_get(member["entity_id"])
