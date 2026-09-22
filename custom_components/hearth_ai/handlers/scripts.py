@@ -128,9 +128,31 @@ async def scripts_validate(hass: HomeAssistant, params: dict[str, Any]) -> dict[
     return await _validate(hass, key, require_config(params))
 
 
+def _free_key(hass: HomeAssistant, data: dict[str, Any], base: str) -> str:
+    """`base`, or `base_2`, `base_3`… — the first not in `scripts.yaml` and not a live script."""
+    key = base
+    n = 2
+    while key in data or hass.states.get(f"{SCRIPT_DOMAIN}.{key}") is not None:
+        key = f"{base}_{n}"
+        n += 1
+    return _check_key(key)
+
+
 async def _save(
-    hass: HomeAssistant, key: str, config: dict[str, Any], *, must_exist: bool, hearth_scene: bool | None = None
+    hass: HomeAssistant,
+    key: str,
+    config: dict[str, Any],
+    *,
+    must_exist: bool,
+    hearth_scene: bool | None = None,
+    new_from: str | None = None,
 ) -> dict[str, Any]:
+    """Write one script. With `new_from`, the key is a new one chosen from that base name.
+
+    The free key is chosen under the same lock that writes `scripts.yaml`, not before it: choosing
+    it, releasing the lock and writing later let two creates with the same name pick the same key,
+    and the second overwrote the first (#173).
+    """
     result = await _validate(hass, key, config)
     if not result["ok"]:
         raise RpcError("validation_failed", result.get("error") or "invalid script", {"status": result.get("status")})
@@ -139,6 +161,8 @@ async def _save(
         data = await read_yaml(hass, path, {})
         if not isinstance(data, dict):
             raise RpcError("ha_error", "scripts.yaml is not a mapping")
+        if new_from is not None:
+            key = _free_key(hass, data, new_from)
         if must_exist and key not in data:
             raise RpcError("not_found", f"no editable script with id {key}")
         data[key] = config
@@ -154,18 +178,11 @@ async def _save(
 async def scripts_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
     config = require_config(params)
     key = params.get("id")
-    if not key:
-        base = slugify(str(config.get("alias") or "hearth_script")) or "hearth_script"
-        key = base
-        path = _path(hass)
-        async with lock_for(path):
-            data = await read_yaml(hass, path, {})
-        n = 2
-        while key in data or hass.states.get(f"{SCRIPT_DOMAIN}.{key}") is not None:
-            key = f"{base}_{n}"
-            n += 1
-    key = _check_key(str(key))
-    return await _save(hass, key, config, must_exist=False, hearth_scene=_hearth_scene(params))
+    if key:
+        return await _save(hass, _check_key(str(key)), config, must_exist=False, hearth_scene=_hearth_scene(params))
+    base = _check_key(slugify(str(config.get("alias") or "hearth_script")) or "hearth_script")
+    # The key itself is chosen inside `_save`, under the lock that writes it.
+    return await _save(hass, base, config, must_exist=False, hearth_scene=_hearth_scene(params), new_from=base)
 
 
 async def scripts_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:

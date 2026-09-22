@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,41 @@ async def test_scene_crud(core: HomeAssistant, tmp_path: Path) -> None:
         await d.dispatch("scenes.create", {"config": {"entities": "not-a-dict"}})
     assert ei.value.code == "validation_failed"
     await d.dispatch("scenes.delete", {"id": created["id"]})
+
+
+async def test_script_create_same_name_concurrently(core: HomeAssistant, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two creates with one name at once get two keys, and neither overwrites the other (#173)."""
+    from custom_components.hearth_ai.handlers import scripts
+
+    # Hold each create at validation until both have got there — the point where the key used to be
+    # chosen already and the lock released — so the two really overlap rather than run in turn.
+    real_validate = scripts._validate
+    arrived = 0
+    both = asyncio.Event()
+
+    async def validate_together(hass, key, config):
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            both.set()
+        await asyncio.wait_for(both.wait(), 5)
+        return await real_validate(hass, key, config)
+
+    monkeypatch.setattr(scripts, "_validate", validate_together)
+    d = build_dispatcher(core)
+    cfg = {"alias": "Race", "sequence": [{"action": "input_boolean.toggle", "target": {"entity_id": "input_boolean.test"}}]}
+    other = {**cfg, "description": "the second one"}
+    first, second = await asyncio.gather(
+        d.dispatch("scripts.create", {"config": cfg}),
+        d.dispatch("scripts.create", {"config": other}),
+    )
+    await core.async_block_till_done()
+    assert {first["id"], second["id"]} == {"race", "race_2"}
+    # Each key holds the body that was sent for it.
+    assert (await d.dispatch("scripts.get", {"id": first["id"]}))["config"].get("description") is None
+    assert (await d.dispatch("scripts.get", {"id": second["id"]}))["config"]["description"] == "the second one"
+    await d.dispatch("scripts.delete", {"id": "race"})
+    await d.dispatch("scripts.delete", {"id": "race_2"})
 
 
 async def test_script_crud(core: HomeAssistant, tmp_path: Path) -> None:
