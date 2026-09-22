@@ -7,7 +7,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-  "pytest-homeassistant-custom-component",
+  "pytest-homeassistant-custom-component==0.13.366",  # pins homeassistant==2026.9.3, as scripts/test.sh does
   "pytest-asyncio",
   "hassil",
   "home-assistant-intents",
