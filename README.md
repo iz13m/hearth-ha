@@ -21,3 +21,6 @@ The integration opens an **outbound** WebSocket to Hearth; no ports, no Nabu Cas
 
 ## Managed AI
 If you subscribe to the Managed tier, a **Hearth AI** conversation agent appears under Settings → Voice assistants. Select it as the agent for an assistant and chat in the HA app or by voice.
+
+## Licence
+Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 Cade Wan SA.
