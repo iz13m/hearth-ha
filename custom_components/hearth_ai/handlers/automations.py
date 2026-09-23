@@ -19,7 +19,7 @@ from ..labels import async_mark_hearth_scene, is_hearth_scene
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
-from .scenes import find_nested_scene_violations
+from .scenes import find_config_violations, find_nested_scene_violations
 
 ORDERED_KEYS = ("alias", "description", "triggers", "trigger", "conditions", "condition", "actions", "action")
 
@@ -33,9 +33,16 @@ def _entity_id(hass: HomeAssistant, key: str) -> str | None:
 
 
 async def _validate(hass: HomeAssistant, key: str, config: dict[str, Any]) -> dict[str, Any]:
-    if violations := find_policy_violations(config) + find_reference_violations(config, "config"):
-        return {"ok": False, "status": "policy", "error": "; ".join(violations)}
-    if violations := await find_nested_scene_violations(hass, config):
+    # Walked **twice**: once as written, once as Home Assistant will run it (#220).
+    #
+    # Neither pass subsumes the other, which is why this is not simply reordered. The raw config is
+    # the only place a templated action name is still a *string* — `async_validate_config_item`
+    # compiles it into a `Template` object the walk would skip, losing AgDR-0042's refusal. And the
+    # validated config is the only place a blueprint's body exists at all: a config that is nothing
+    # but `{"use_blueprint": {...}}` walks clean raw, while HA expands it into whatever the
+    # blueprint does — `shell_command.rm` and `lock.unlock` in the case that prompted this.
+    # Checked against the pinned 2026.9.3 rather than assumed.
+    if violations := await find_config_violations(hass, config):
         return {"ok": False, "status": "policy", "error": "; ".join(violations)}
     try:
         validated = await async_validate_config_item(hass, key, config)
@@ -45,6 +52,8 @@ async def _validate(hass: HomeAssistant, key: str, config: dict[str, Any]) -> di
     status_s = str(getattr(status, "value", status))
     if status_s != "ok":
         return {"ok": False, "status": status_s, "error": getattr(validated, "validation_error", None) or "invalid"}
+    if isinstance(validated, dict) and (violations := await find_config_violations(hass, dict(validated))):
+        return {"ok": False, "status": "policy", "error": "; ".join(violations)}
     return {"ok": True, "status": "ok"}
 
 

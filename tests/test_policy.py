@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,11 @@ from custom_components.hearth_ai.policy import (
     DENIED_ENTITY_DOMAINS,
     HOST_SERVICE_DOMAINS,
     REFERENCEABLE_DENIED_DOMAINS,
+    _fold,
     find_policy_violations,
     find_reference_violations,
     find_scene_policy_violations,
+    find_service_call_violations,
 )
 
 SCHEMA = Path(__file__).resolve().parents[2] / "shared" / "schema" / "methods.json"
@@ -67,22 +70,20 @@ async def test_handlers_refuse_denied_configs(core, tmp_path) -> None:  # noqa: 
         await d.dispatch("scenes.create", {"config": {"name": "x", "entities": {"lock.a": "unlocked"}}})
 
 
-def test_a_reference_is_found_wherever_it_hides() -> None:
-    """Mirror of the policy.test.ts cases; the two implementations must agree exactly (AgDR-0038)."""
-    assert len(find_reference_violations({"entity_id": "lock.front_door"})) == 1
-    assert len(find_reference_violations({"sources": ["sensor.a", "camera.porch"]})) == 1
-    assert len(find_reference_violations({"entities": {"device_tracker.phone": "home"}})) == 1
-    assert len(find_reference_violations({"state": "{{ states('lock.front_door') }}"})) == 1
-    assert len(find_reference_violations({"state": "{{ states.lock.front_door.state }}"})) == 1
-    assert len(find_reference_violations({"turn_on": [{"action": "shell_command.backup_now"}]})) == 1
-    assert len(find_reference_violations({"image": "image.doorbell_last"})) == 1
+def test_the_reference_walkers_agree_on_every_shared_case() -> None:
+    """
+    The same form values, the same verdicts, in both languages (AgDR-0038).
 
-
-def test_a_reference_scan_leaves_ordinary_configuration_alone() -> None:
-    assert find_reference_violations({"state": "{{ states('sensor.door_lock_battery') }}"}) == []
-    assert find_reference_violations({"path": "/config/www/camera.jpg"}) == []
-    assert find_reference_violations({"entity_id": "binary_sensor.person_detected"}) == []
-    assert find_reference_violations({"state": "{{ states('light.hall') }}"}) == []
+    These cases were mirrored by hand here and in `policy.test.ts` until #220, which is the same
+    arrangement that let `scene.apply` be caught on one side only (#126) — and it mattered at once:
+    half of #220's fix is a case fold in *this* walker, because a config-flow form value carries no
+    action and `find_policy_violations` returns `[]` for it by design. A fold applied to one walker
+    and not the other now fails here instead of shipping as an open form path.
+    """
+    cases = json.loads(SCHEMA.read_text())["reference_walk_cases"]
+    assert len(cases) > 10, "run pnpm --filter @hearth/shared export:jsonschema first"
+    for case in cases:
+        assert find_reference_violations(case["config"]) == case["violations"], case["name"]
 
 
 def test_a_templated_action_name_is_refused() -> None:
@@ -125,3 +126,129 @@ def test_an_automation_is_never_triggered_or_flipped_from_a_config() -> None:
     for action in ("automation.trigger", "automation.turn_on", "automation.turn_off", "automation.toggle"):
         assert len(find_policy_violations({"actions": [{"action": action}]})) == 1
     assert find_policy_violations({"actions": [{"action": "automation.reload"}]}) == []
+
+
+@pytest.mark.usefixtures("core")
+async def test_a_blueprint_cannot_smuggle_a_denied_action_past_the_walk(core, tmp_path) -> None:  # noqa: ANN001
+    """
+    A config that is nothing but `use_blueprint` carries no actions for the walk to read (#220).
+
+    Both walkers answer `[]` for it — correctly, there is nothing there — while Home Assistant
+    expands it into whatever the blueprint does. This is why `_validate` walks the config a second
+    time as `async_validate_config_item` returns it: that is the only form in which the blueprint's
+    body exists. Written against the pinned 2026.9.3, where the expansion really does happen here.
+    """
+    import pathlib
+
+    from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
+
+    d = pathlib.Path(core.config.path("blueprints/automation/hearth_probe"))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "p.yaml").write_text(
+        "blueprint:\n"
+        "  name: probe\n"
+        "  domain: automation\n"
+        "  input:\n"
+        "    delay:\n"
+        "      name: delay\n"
+        "triggers:\n"
+        "  - trigger: time_pattern\n"
+        "    seconds: \"/5\"\n"
+        "actions:\n"
+        "  - action: shell_command.rm\n"
+        "  - action: lock.unlock\n"
+        "    target:\n"
+        "      entity_id: lock.front_door\n"
+        "  - delay: !input delay\n"
+    )
+    cfg = {"alias": "looks harmless", "use_blueprint": {"path": "hearth_probe/p.yaml", "input": {"delay": "00:00:05"}}}
+
+    # The walk on the config as written finds nothing — that is the whole point of the case.
+    assert find_policy_violations(cfg) == []
+    assert find_reference_violations(cfg, "config") == []
+
+    d2 = build_dispatcher(core)
+    res = await d2.dispatch("automations.validate", {"config": cfg})
+    assert res["ok"] is False and res["status"] == "policy"
+    assert "shell_command.rm" in res["error"] and "lock.unlock" in res["error"]
+    with pytest.raises(RpcError):
+        await d2.dispatch("automations.create", {"config": cfg})
+
+
+def test_a_kelvin_sign_is_folded_into_the_denied_service_it_names() -> None:
+    """Mirror of `the two walkers fold the same way` in policy.test.ts (#220).
+
+    U+212A is the only codepoint at or above 0x80 whose lowercase is pure ASCII, swept over
+    0x80..0x10FFFF on both runtimes rather than sampled, and Home Assistant folds it:
+    `cv.service("LOC\u212a.UNLOCK")` returns `"lock.unlock"` on the pinned 2026.9.3. An ASCII-only
+    fold would leave `loc\u212a.unlock`, which is in no denied list.
+    """
+    assert _fold("LOC\u212a.UNLOCK") == "lock.unlock"
+    assert find_policy_violations({"actions": [{"action": "LOC\u212a.UNLOCK", "target": {"entity_id": "LOC\u212a.FRONT_DOOR"}}]}) != []
+
+
+def test_a_long_s_matches_a_reference_the_way_the_hub_does() -> None:
+    """U+017F is not a `.lower()` divergence — both runtimes leave it alone.
+
+    It diverged because the reference regex folds via the engine: `re.IGNORECASE` is full Unicode
+    here, and JavaScript only matches that under its `u` flag, which `policy.ts` now sets.
+    """
+    assert find_reference_violations({"entity_id": "\u017fhell_command.rm"}) != []
+    assert find_reference_violations({"entity_id": "ba\u017fkup.now"}) == []  # control: folds to "baskup"
+
+
+def test_every_codepoint_that_folds_into_ascii_is_folded_the_same_way() -> None:
+    """The invariant that actually decides verdicts, rather than a witness codepoint.
+
+    The two folds differ on 28 codepoints under the pinned pair, and that set moves when either
+    runtime updates its Unicode tables — but a divergence changes an outcome only if it changes
+    whether a token matches a denied-list entry, and all 30 of those are pure ASCII. So this is the
+    property worth holding, and it survives a table change. It also catches a no-op fold and an
+    ASCII-only fold, which the weaker phrasing ("alters nothing outside [A-Z]") does not.
+    """
+    crossing = [f"U+{cp:04X}" for cp in range(0x80, 0x110000) if not (0xD800 <= cp <= 0xDFFF) and chr(cp).lower() != chr(cp) and chr(cp).lower().isascii()]
+    # If this list ever grows, policy.ts must fold the new codepoint identically.
+    assert crossing == ["U+212A"]
+    assert _fold("\u212a") == "k"
+
+
+def test_a_denied_token_spelled_with_a_folding_codepoint_still_matches() -> None:
+    """The assertion that guards the *matcher*, not the fold helper (#220).
+
+    `policy.ts` fixes this with a regex flag, and a property over fold helpers cannot see a flag
+    change at all — this walker's case handling is the engine's. The crossing set is computed rather
+    than hardcoded so a future Unicode release that adds a second such codepoint is picked up with
+    no edit, which is the lesson from three witness codepoints chosen wrong.
+    """
+    crossers = {
+        chr(cp): chr(cp).lower()
+        for cp in range(0x80, 0x110000)
+        if not (0xD800 <= cp <= 0xDFFF) and len(chr(cp).lower()) == 1 and re.fullmatch(r"[a-z0-9_]", chr(cp).lower())
+    }
+    assert sorted(set(crossers.values())) == ["k"]  # U+212A today; grows only if Unicode adds one
+
+    # Three denied tokens carry a `k`, not one: `lock`, `device_tracker` and `backup`.
+    tokens = REFERENCEABLE_DENIED_DOMAINS | HOST_SERVICE_DOMAINS
+    missed = [
+        token.replace(lower, ch) + ".x"
+        for ch, lower in crossers.items()
+        for token in tokens
+        if lower in token and not find_reference_violations({"entity_id": token.replace(lower, ch) + ".x"})
+    ]
+    assert missed == []
+
+
+def test_the_service_call_walkers_agree_on_every_shared_case() -> None:
+    """
+    `devices.call`, in both languages — the third walker, pinned by nothing until #220.
+
+    It regressed inside that PR: this module built its message from the caller's spelling and then
+    compared that raw string against `DENIED_ACTIONS`, so adding the fold made the malformed-name
+    guard stop rejecting `Homeassistant.Restart` and nothing else caught it. `rpc.py` validates no
+    parameter formats, so on the box this function is the last gate.
+    """
+    cases = json.loads(SCHEMA.read_text())["service_call_cases"]
+    assert len(cases) > 10, "run pnpm --filter @hearth/shared export:jsonschema first"
+    for case in cases:
+        i = case["input"]
+        assert find_service_call_violations(i["domain"], i["service"], i["entityIds"]) == case["violations"], case["name"]

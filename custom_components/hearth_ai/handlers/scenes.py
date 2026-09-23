@@ -14,7 +14,7 @@ from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from ..policy import DENIED_ENTITY_DOMAINS, _entity_ids, find_reference_violations, find_scene_policy_violations
+from ..policy import _fold, DENIED_ENTITY_DOMAINS, _entity_ids, find_policy_violations, find_reference_violations, find_scene_policy_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import _exposed
@@ -125,6 +125,15 @@ def _nodes(node: Any) -> Iterator[dict[str, Any]]:
 _UNRESOLVABLE_TARGET_KEYS = ("device_id", "area_id", "floor_id", "label_id")
 
 
+async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
+    """Every policy check a written automation or script must pass, over one config.
+
+    Kept here because `automations.py` and `scripts.py` must ask exactly the same question — the
+    pair of `_validate` functions drifting is the shape of bug this module already exists to stop.
+    """
+    return find_policy_violations(config) + find_reference_violations(config, "config") + await find_nested_scene_violations(hass, config)
+
+
 async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list[str]:
     """
     Why a script or automation may not be written: it activates a scene that sets a denied entity.
@@ -143,7 +152,11 @@ async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list
     problems: list[str] = []
     checked: set[str] = set()
     for node in _nodes(config):
-        if node.get("action", node.get("service")) != f"{SCENE_DOMAIN}.turn_on":
+        # Folded, for the reason `policy._fold` gives: HA lower-cases a service name itself, so a
+        # `Scene.Turn_On` would otherwise walk straight past the one check that reads what a scene
+        # holds (AgDR-0012). The `homeassistant.turn_on` alias needs no branch here — the fan-out
+        # rule refuses it at a scene outright, before this check is reached (#220).
+        if _fold(str(node.get("action", node.get("service")) or "")) != f"{SCENE_DOMAIN}.turn_on":
             continue
         target = node.get("target") if isinstance(node.get("target"), dict) else {}
         for key in _UNRESOLVABLE_TARGET_KEYS:

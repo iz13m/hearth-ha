@@ -62,15 +62,23 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
     import re  # noqa: PLC0415
 
     problems: list[str] = []
+    # `full` keeps the caller's spelling, because it is what the messages quote back. Every
+    # *comparison* uses the folded pair — mixing the two is how mixed case walked past
+    # `DENIED_ACTIONS` here while the hub refused it: before the fold existed, the malformed-name
+    # guard below rejected `Homeassistant.Restart` outright, so folding made that guard pass and
+    # left a raw string being tested against a lower-case list.
     full = f"{domain}.{service}"
+    raw_domain = domain
+    domain, service = _fold(domain), _fold(service)
+    folded = f"{domain}.{service}"
     if not re.fullmatch(r"[a-z0-9_]+", domain) or not re.fullmatch(r"[a-z0-9_]+", service):
         return [f"{full}: malformed service name"]
     if domain in DENIED_ACTION_DOMAINS:
-        problems.append(f"{full}: domain {domain} can never be controlled")
-    if full in DENIED_ACTIONS:
+        problems.append(f"{full}: domain {raw_domain} can never be controlled")
+    if folded in DENIED_ACTIONS:
         problems.append(f"{full}: not allowed")
     if domain in ROUTINE_DOMAINS:
-        problems.append(f"{full}: use scenes.activate or scripts.run instead of calling the {domain} domain directly")
+        problems.append(f"{full}: use activate_scene or run_script instead of calling the {raw_domain} domain directly")
     if not entity_ids:
         problems.append(f"{full}: at least one entity_id is required (broad targets are not allowed)")
     for eid in entity_ids:
@@ -80,7 +88,7 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
         elif d in DENIED_ENTITY_DOMAINS:
             problems.append(f"{eid}: entities in {d} can never be controlled")
         elif d in ROUTINE_DOMAINS:
-            problems.append(f"{eid}: use scenes.activate or scripts.run for {d} entities")
+            problems.append(f"{eid}: use activate_scene or run_script for {d} entities")
     return list(dict.fromkeys(problems))
 
 
@@ -88,9 +96,23 @@ _LIST_KEYS = {"actions", "action", "sequence", "then", "else", "default", "paral
 
 
 def _domain(value: Any) -> str | None:
+    """The domain part of `domain.object_id`, **case-folded** (#220).
+
+    Home Assistant decides case *after* we do: `cv.service` and `cv.entity_id` both `.lower()` their
+    input (`helpers/config_validation.py`), so `Lock.Unlock` is stored raw, passes a walk that
+    compares against lower-case lists, and runs as `lock.unlock`. Folded here rather than at each
+    call site, so a future check cannot forget to do it.
+    """
     if not isinstance(value, str) or "." not in value:
         return None
-    return value.split(".", 1)[0]
+    return value.split(".", 1)[0].lower()
+
+
+
+
+def _fold(value: Any) -> str:
+    """A whole service name or entity id as Home Assistant will read it. See `_domain`."""
+    return value.lower() if isinstance(value, str) else ""
 
 
 def _entity_ids(target: Any) -> list[str]:
@@ -144,8 +166,11 @@ union here makes "never listed, never readable" and "never referenceable" one se
 HOST_SERVICE_DOMAINS: frozenset[str] = frozenset({"shell_command", "python_script", "hassio", "backup"})
 """Service domains that are host-level wherever they appear, including inside a template string."""
 
+# `IGNORECASE`, because this one reads raw text rather than a parsed id: `Lock.Front_Door` names the
+# same entity HA will open, and a case-sensitive pattern is blind to it (#220).
 _REFERENCE_RE = re.compile(
-    r"(?<![A-Za-z0-9_/\-])(" + "|".join(sorted(REFERENCEABLE_DENIED_DOMAINS | HOST_SERVICE_DOMAINS)) + r")\.[a-z0-9_]+"
+    r"(?<![A-Za-z0-9_/\-])(" + "|".join(sorted(REFERENCEABLE_DENIED_DOMAINS | HOST_SERVICE_DOMAINS)) + r")\.[a-z0-9_]+",
+    re.IGNORECASE,
 )
 _TEMPLATE_RE = re.compile(r"\{\{|\{%")
 
@@ -203,7 +228,7 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
             dom = _domain(action)
             if dom in DENIED_ACTION_DOMAINS:
                 problems.append(f"{p}: action {action} targets denied domain {dom}")
-            if action in DENIED_ACTIONS:
+            if _fold(action) in DENIED_ACTIONS:
                 problems.append(f"{p}: action {action} is not allowed")
             ids = _entity_ids(node.get("target")) + _entity_ids(node.get("data")) + _entity_ids(node)
             if dom == "scene":
@@ -211,13 +236,16 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
             for eid in ids:
                 if _domain(eid) in DENIED_ENTITY_DOMAINS:
                     problems.append(f"{p}: entity {eid} is in denied domain {_domain(eid)}")
+            # An action that decides its own blast radius from its target (#220). After the
+            # denied-domain sweep above, which still applies to whatever ids it does name.
+            problems.extend(find_fan_out_violations(action, node, ids, p))
         # A device action names no entity and carries no service: `{device_id, domain: "lock",
         # type: "unlock"}` has no `action` key at all, so everything above skips it while HA still
         # opens the door. The check is therefore on the shape and sits outside the action branch.
         # It catches a device *trigger* and *condition* too, deliberately — the same three keys are
         # all three shapes, and a lock is something the model may not even read the state of.
         device_domain = node.get("domain")
-        if isinstance(device_domain, str) and device_domain in DENIED_ENTITY_DOMAINS and ("type" in node or "device_id" in node):
+        if isinstance(device_domain, str) and _fold(device_domain) in DENIED_ENTITY_DOMAINS and ("type" in node or "device_id" in node):
             problems.append(f"{p}: device in denied domain {device_domain}")
         for k, v in node.items():
             if k in _LIST_KEYS or isinstance(v, (dict, list)):
@@ -225,6 +253,81 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
 
     visit(config, path)
     return list(dict.fromkeys(problems))
+
+
+
+# Target keys Home Assistant resolves against its own registries, which we cannot read here.
+# `scene.turn_on` has refused these since AgDR-0042; `fans_out` generalises that rule.
+# A tuple, in policy.ts's declaration order: `test_policy.py` compares the two walkers' messages
+# as ordered lists, so a target carrying two of these must produce them in the same order here.
+INDIRECT_TARGET_KEYS = ("device_id", "area_id", "floor_id", "label_id")
+
+# A group's membership lives in Home Assistant, so a `group.*` id is as unresolvable as an area.
+_GROUP_DOMAIN = "group"
+
+
+def fans_out(action: str) -> bool:
+    """Whether an action's effect is decided by something other than its own domain (#220).
+
+    Mirror of `fansOut` in packages/shared/src/policy.ts; see that doc comment for how the list was
+    derived from the pinned Home Assistant rather than written from memory.
+    """
+    dom = _domain(action)
+    folded = _fold(action)
+    if dom == "homeassistant":
+        return folded[len(dom) + 1 :] in {"turn_on", "turn_off", "toggle"}
+    if folded == "scene.turn_on":
+        return True
+    if dom == "script":
+        return folded[len(dom) + 1 :] not in {"reload", "turn_off"}
+    return False
+
+
+def find_fan_out_violations(action: str, node: dict[str, Any], ids: list[str], p: str) -> list[str]:
+    """What a fan-out action may not carry: a target we cannot resolve, and so cannot check.
+
+    A refusal rather than a resolution, deliberately. Neither side can resolve an `area_id` at
+    authoring time to a set that stays true afterwards — someone re-labelling a camera would change
+    it. Refusing what cannot be checked is the only answer that survives the config being written.
+
+    Home Assistant registers the generic services with `extra=vol.ALLOW_EXTRA`, so `entity_id` is
+    validated by `cv.entity_ids` (which is why `entity_id: all` dies there) while these four pass
+    through untouched and are resolved later by `async_extract_referenced_entity_ids`. That
+    asymmetry is exactly why this vector is open and that one is not.
+    """
+    problems: list[str] = []
+    if not fans_out(action):
+        return problems
+    target = node.get("target") if isinstance(node.get("target"), dict) else {}
+    for key in INDIRECT_TARGET_KEYS:
+        if key in target or key in node:
+            problems.append(f"{p}: action {action} decides what it touches from its target, so it may not use {key} — name the entities")
+    for eid in ids:
+        # The same reasoning that refuses a templated *action* name, applied to the target: HA
+        # renders it at run time (`template.render_complex(conf, variables)` in
+        # `helpers/service.py`, checked against the pinned 2026.9.3), so `{{ 'scene.gate' }}` reads
+        # here as an ordinary string in no denied domain and is a scene by the time it runs. Only
+        # for an action that fans out — `light.turn_on` at a templated id still reaches only a light.
+        if _TEMPLATE_RE.search(eid):
+            problems.append(
+                f"{p}: action {action} decides what it touches from its target, and {eid} is a template; "
+                "what it would reach cannot be known until it runs"
+            )
+            continue
+        ed = _domain(eid)
+        if ed == _GROUP_DOMAIN:
+            problems.append(f"{p}: action {action} aimed at {eid} reaches whatever that group holds, which is not knowable here")
+        # The alias is how `automation.turn_off` and `script.turn_on` come back under another name:
+        # both are refused as direct actions, and neither becomes safe for being reached indirectly.
+        if ed in ROUTINE_DOMAINS and _domain(action) == "homeassistant":
+            article = "an" if ed == "automation" else "a"
+            problems.append(f"{p}: action {action} aimed at {eid} runs {article} {ed}; use activate_scene or run_script")
+    # Only the dispatcher: HA refuses it without a target anyway, but a target made only of keys we
+    # just refused would otherwise read as "no problem found". A per-script service such as
+    # `script.my_script` legitimately names no entities, which is why this is not general.
+    if not ids and _domain(action) == "homeassistant":
+        problems.append(f"{p}: action {action} needs the entities it acts on named here")
+    return problems
 
 
 def find_scene_policy_violations(config: Any) -> list[str]:
