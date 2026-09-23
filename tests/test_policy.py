@@ -463,3 +463,518 @@ def test_every_declared_value_shape_is_classified() -> None:
             continue
         gaps.extend(f"{key}: alternative {a!r} is in neither the read nor the declared-inert list" for a in alts if a not in known)
     assert not gaps, "cv.SERVICE_SCHEMA declares a value shape nothing classifies:\n  " + "\n  ".join(gaps)
+
+
+def test_every_path_writing_service_is_classified() -> None:
+    """
+    Every Home Assistant service taking a file path is classified, on **both** axes (#227).
+
+    The hole was `downloader`: a model with `integrations.manage` set its download directory to the
+    config directory and then overwrote `automations.yaml` with an automation that unlocked a door
+    — which passed no policy walker because it never went through the write path they sit on.
+
+    **Two axes, because a denylist with one output hides half the class:**
+
+        setup   DENIED_DOMAINS   the model installs it       (integrations.manage, opt-in)
+        call    DENIED_ACTIONS   the household installed it  (automations.write, DEFAULT ON)
+
+    `downloader` is in both because it is both. `homematicip_cloud.dump_hap_config` is only in the
+    second, and would have been invisible to a setup-only list.
+
+    **This instrument covers the CALL axis only, and the setup axis is hand-maintained.**
+
+    The enumeration below globs `*/services.yaml` — services. A config flow that takes a filesystem
+    path is invisible to it, which is how `local_file` was missed: its flow takes `CONF_FILE_PATH`
+    validated by `os.access` alone, and the resulting `camera.*` entity serves that file's bytes. A
+    reviewer found it by reading. So this file argues "two axes, because one output hides half the
+    class" while enumerating one of them, and the setup axis is **hand-kept**. Note the two lists
+    differ and neither is "the setup denials": `flows.DENIED_DOMAINS` is the enforced set, while
+    `REFUSED_AT_SETUP` below is only the part of it this scan can also surface (`downloader`,
+    `hassio`) — `local_file` and `upb` are enforced and deliberately absent from it, per assertion 7.
+
+    A scan of the setup axis exists at `RESEARCH/HEARTH_SETUP_AXIS_SCAN/`, deliberately outside the
+    suite, because **it is not fit to drive a denial**:
+
+        TIGHT (explicit file-path fields):  13 flows,  2 gated, 11 ungated
+        LOOSE (+ any _PATH, key_file):      40 flows,  3 gated, 37 ungated
+
+    Neither is the surface. The loose pattern pulls in HTTP routes and storage keys; the tight one
+    missed `folder_watcher`, which *is* gated — so it was wrong in both directions. Denying its
+    output would have refused `zwave_js`, `mqtt` and `zha` on the strength of a regex, where
+    `zwave_js`'s "path" is `/dev/ttyUSB0`.
+
+    Read-verified during review, so the surface is known rather than merely enumerated. Three
+    mechanisms take a flow out, and which one applies matters more than the verdict:
+      * **upload, not path** — `google_cloud`, `mqtt`, `sftp_storage` and `velbus` (`CONF_VLP_FILE`)
+        use `FileSelector` + `process_uploaded_file`: the caller supplies **bytes** it already holds.
+      * **fixed internal write** — `bosch_shc` takes only host + password; it *writes* a cert/key
+        pair to `hass.config.path(DOMAIN, unique_id, …)`, content from the pairing result. Neither
+        the path nor the content is caller-chosen, and nothing is read back out.
+      * **not a host path at all** — `transmission`, `octoprint` and `zwave_js` paths are URL routes;
+        `zha` and `bryant_evolution` are serial devices.
+
+    **`upb` was the one other raw host-path read, and it is now denied at setup too.** It was first
+    left open on the bound "the content must parse as a UPB export, so a parse oracle rather than
+    disclosure" — which nobody had checked, because the read is in external `upb_lib`. Reading it
+    showed the bound was wrong in both directions: the format check is `line1.split(",")[0] == "0"`
+    so `/etc/hosts` passes, and past it the file's bytes become **entity names** a model reads back
+    through `list_entities`. See `flows.DENIED_DOMAINS` for the mechanism and
+    `RESEARCH/HEARTH_UPB_SETUP_AXIS/FINDINGS.md` for the run.
+
+    **It is not in the buckets below, and that is assertion 7 working rather than an omission.**
+    The scan globs `*/services.yaml`; upb declares services but none takes a path, so classifying
+    it here would be a claim the scan cannot support. It is a setup-axis denial the call-axis
+    instrument structurally cannot see — the same blindness that hid `local_file`, which is why
+    the hand-kept list is the answer on this axis and the scan is not.
+
+    A coarse sieve flagged `bosch_shc`, `upb` and `velbus` together. Two are false positives and the
+    third is the finding, which is why the mechanism is recorded per flow above: a list of verdicts
+    with the reasons stripped is re-derivable only by doing the reading again.
+
+    **Deny on properties. Enumerate with instruments. Never mistake the output of the second for the
+    first.** `downloader` was denied on a property — an ungated caller-chosen path fixed at setup,
+    demonstrated end-to-end through the dispatcher. A list whose membership triples when a regex
+    widens is a pattern with a product cost attached, not a rule. #256 holds the reading that would
+    turn the setup axis into properties, and its question is not "does it take a path" but **does
+    the content ever surface, or is the effect a planted configuration?**
+
+    **What this does not do.** It forces a human decision on anything new; it does not prove safety.
+    "Is it gated by `is_allowed_path`?" is answered by reading the component, and a component can
+    gate a different field than the one that matters — `transmission` calls it on the torrent
+    *source* while `download_dir` is the destination. So bucket 3 records **which field** is gated,
+    not that the call appears. A classifier keyed on the call alone would have called that safe.
+
+    The enumeration is derived from HA's own source, so a new integration that writes files fails
+    here **naming the domain** rather than being found by attack. Do not add a bucket for accepted
+    risk: if it writes to a caller-chosen host path it is refused, and if the write lands on a
+    remote service's filesystem that is bucket 3 or 4 with a reason.
+
+    **Why the `[%key:...%]` resolve step stays even though it finds no new domain.** At 2026.9.3,
+    resolving references changes which *fields* carry path language (nine more, in
+    `telegram_bot`, `minio` and `hassio`) and not which *domains* do. That it changes no domain is
+    a property of where Home Assistant happens to have put the literal text — a reference in a
+    domain with no other path-shaped field would surface a domain the unresolved scan cannot see.
+    The step removes a dependence on HA's translation bookkeeping; that the dependence is currently
+    harmless is luck rather than design. Delete it and the net is blind to a quarter of the corpus.
+
+    **The boundary, stated with its counts, because a count is a property of a pattern:** it is real
+    and, at 2026.9.3, empty — probed by instruments whose own counts disagreed (23 domains by field
+    name; 4 and 17 by description at two thresholds; 19 against 27 on the write-primitive sweep, whose
+    count was inflated by an overbroad regex and is corrected below) and which agreed on the only thing that matters: **no
+    service field drives a host write outside these buckets.** That the counts disagree while the
+    conclusion holds is the point — a count is a property of a pattern, the conclusion is not.
+
+    **What is asserted here, and the state of the evidence that is not.** Everything above runs in
+    this test. The backstop that depends on neither names nor descriptions — a scan of service
+    handlers for file-write primitives — is **not** in this file.
+
+    One adversarial sweep during review found no service field driving a host write outside these
+    buckets. **Its count is unreliable, and the cause is known.** The as-run regex matched a bare
+    `.write(`, which catches socket, stream and HTTP-response writes rather than file writes,
+    inflating the file-writer set from ~17 to 27: the extra ten (`ai_task api ebusd esphome hassio
+    icloud immich onkyo reolink unifiprotect`) are stream writes — `await response.write(chunk)` in
+    `reolink/views.py`, a proxy stream in `esphome/ffmpeg_proxy.py`, serial protocol in `onkyo` —
+    each already read and classified as not a caller-chosen host path.
+
+    The remaining 17-vs-19 spread is a **second** blind spot, not imprecision: the sweep globbed
+    each component's top-level `*.py` only. Recursing finds two more real file writes —
+    `knx/storage/keyring.py` (`shutil.move`) and
+    `zwave_js/scripts/convert_device_diagnostics_to_fixture.py` (`write_text`) — neither
+    caller-chosen. So the file-writer set is **19 when you look in subdirectories and 17 when you
+    do not**.
+
+    **The conclusion is unaffected because it never rested on the count** — it rested on reading the
+    components, and both of the sweep's errors were errors of counting. That is the useful thing
+    here: the count moved by ten and then by two, and the verdict did not move at all. Both
+    derivations and the as-run script are in `RESEARCH/HEARTH_PATH_WRITER_PATTERN/`.
+
+    Whether "contains a file-write primitive" can be pinned tightly enough for CI at all — given it
+    took two people, three regexes and two file-set definitions to agree on a number — is what #252
+    exists to decide.
+
+    **Do not narrow the prose half of `path_language`, and here is the argument you will otherwise
+    make for narrowing it.** At 2026.9.3 ten of its eleven additions are false positives —
+    `recorder.repack` matched "save disk space". That evidence is permanent, it is visible in the
+    bucket-4 entries below, and it argues for deletion every time anyone reads this.
+
+    **It is kept anyway, because it is the only check covering a path described in words with no
+    filename and no path token in the field name** — "the location to write to". The instrument that
+    would replace that coverage is a write-primitive **data-flow** scan: a service field's value
+    reaching a write primitive's path argument. That is static analysis, not a grep — an adversarial
+    sweep during review found components containing file writes and triaged those outside these
+    buckets **by reading each one** (its counts were wrong twice over; corrected below), so a pinned version would
+    flag them all and demand per-component judgments that rot exactly like the claims
+    quote-the-match exists to remove. It does not exist; it is #252. **Do not narrow this without
+    shipping that first.**
+
+    The filename half stays regardless of any of the above. It is what found `device_tracker`, whose
+    `dev_id` is described as "find the ID in `known_devices.yaml`" — a real file, named, with no
+    prose token in the sentence, missed by every word-based instrument including the ones written to
+    attack this one.
+    """
+    import pathlib
+    import re
+
+    import homeassistant.components as ha_components
+    import yaml
+
+    from custom_components.hearth_ai.handlers.flows import DENIED_DOMAINS
+
+    # **A domain can be dangerous on both axes**, so these are separate maps rather than one
+    # bucket per domain. `downloader` is in both — denying only its setup left every household
+    # whose download directory is already the config directory exposed, which is #227's own
+    # demonstrated configuration.
+    REFUSED_AT_SETUP = {
+        "downloader": "writes caller-chosen bytes to a caller-chosen path; directory fixed at setup, so HA never gates it",
+        "hassio": "supervisor; already refused entirely. Surfaced by the widened scan via backup field descriptions",
+    }
+    # domain -> the **exact service**, because a domain prefix passes `automation` on
+    # `automation.trigger` while leaving `automation.reload` undenied.
+    REFUSED_AT_CALL = {
+        "downloader": "downloader.download_file",
+        "telegram_bot": "telegram_bot.download_file",
+        "local_file": "local_file.update_file_path",
+        "homematicip_cloud": "homematicip_cloud.dump_hap_config",
+    }
+    GATED_BY_HA = {  # bucket 3 — name the field the gate is actually on
+        "camera": "filename, via is_allowed_path; and the domain is refused to models entirely",
+        "image": "filename, via is_allowed_path; domain refused entirely",
+        "file": "file_name, via is_allowed_path (allowlist_external_dirs is empty by default)",
+        "androidtv": "local_path, via is_allowed_path",
+        "blink": "filename, via is_allowed_path",
+        "color_extractor": "color_extract_path, via is_allowed_path",
+        "google_photos": "filename, via is_allowed_path",
+        "onedrive": "filename, via is_allowed_path",
+        "openai_conversation": "filenames, via is_allowed_path",
+        # NOT telegram_bot — its `is_allowed_path` guards `load_data`, the outbound send, while
+        # `directory_path` is the ungated destination. It is refused at the call axis instead.
+        "minio": "file_path, via is_allowed_path",
+        # Surfaced only once the scan recursed into nested `fields` — `attachments.filename` sits
+        # inside a collapsible section, so the first-level scan never saw it. The attachment path
+        # itself is gated at `smtp/helpers.py:118` (`is_allowed_path`); the nested `filename` that
+        # matched is the attachment's *display* name, not a path.
+        "smtp": "the attachment path, via is_allowed_path at helpers.py:118",
+    }
+    # Bucket 4 — **not a host write**, either because it lands on a remote service or because the
+    # pattern matched something that is not a path at all. Every reason **quotes what matched**
+    # rather than asserting where the write goes: a claim about the world rots when the component
+    # changes, a claim about the match cannot. `local_file` was in here with the reason "on a remote
+    # filesystem" — emphatically false, and sayable only because the reason was a claim about the
+    # world. That is the rule's origin and the reason it is not optional.
+    ON_A_REMOTE_FILESYSTEM = {
+        "transmission": "download_path — matched on the field name; goes to the Transmission daemon, and note its is_allowed_path gates the torrent SOURCE not this",
+        # Was "an upload to the household's own Immich server" — true, and the wrong property.
+        # What makes it safe is the **selector**: `{media: {accept: [image/*, video/*]}}`, so the
+        # value is a media-source reference and not a host path at all. Swap it for a
+        # `TextSelector` upstream and the old reason still reads true while the danger appears.
+        "immich": "file — a media selector ({media: accept image/*,video/*}), so the value is a media-source reference, not a host path",
+        # These two are the weak kind and are labelled as such deliberately. Both are **plain
+        # `{text: null}` selectors** — checked, not assumed — so nothing about the field's shape
+        # makes them safe; the reason is entirely *where the value goes*, which is a claim about
+        # the world and rots when the component changes. Stated so the next auditor knows these
+        # are the rows to re-read, not the rows to trust.
+        "system_bridge": "path — a plain text selector; safe only because open_path sends it to the remote System Bridge host. World-claim: re-read if that changes",
+        "guardian": "filename — a plain text selector; safe only because upgrade_firmware sends it to the remote device. World-claim: re-read if that changes",
+        "html5": "dir — matched on the field name; the value is a text direction, ltr or rtl",
+        "ntfy": "attach_file — matched on the field name; the value is a URL",
+        # NOT local_file — "read-only" was true and irrelevant: it redirects the camera at any
+        # readable host path. Refused at the call axis.
+        "cast": "dashboard_path/view_path — matched on the field name; the values are Lovelace view ids",
+        "google_travel_time": "destination — matched on the field name; the value is a street address",
+        "waze_travel_time": "destination — matched on the field name; the value is a street address",
+        # Surfaced by the widened description scan rather than by field name. These quote **what
+        # matched**, not a claim that the component is safe: a claim about the world rots when the
+        # component changes, a quote about the match cannot. If you are auditing one of these, read
+        # the quoted text — the pattern fired on prose, not on a path.
+        "alexa_devices": "sound — matched 'file' in 'The sound file to play.'",
+        "deconz": "field — matched 'path' in 'a full path to deCONZ endpoint' (a REST resource, not a filesystem)",
+        "imap": "target_folder — matched 'folder' in 'The target folder the email should be moved to.'",
+        "recorder": "repack — matched 'save' in 'Attempt to save disk space…'",
+        "remote": "alternative — matched 'stored' in 'If code must be stored as an alternative.'",
+        "shelly": "key — matched 'stored' in 'the key under which the KVS value will be stored'",
+        "vallox": "duration — matched 'stored' in 'device uses stored duration.'",
+        "velbus": "address — matched 'directory' in the module-address description",
+        "xiaomi_miio": "slot — matched 'save' in 'the slot used to save the IR command.'",
+        # The previous reason here said "matched 'file' inside a word" and that is wrong — the
+        # description reads "your device's configuration **file**", a standalone word. A reason
+        # that misdescribes its own match is the defect quoting-the-match exists to prevent, so it
+        # is worth more than the correction: it means nobody re-read the string. The real property
+        # is the field's **type** — `value_size` takes 1, 2 or 4.
+        "zwave_js": "value_size — a number selector (1|2|4); matched 'file' in 'your device's configuration file', which is a file on the device, not a path this call supplies",
+        # The one the filename half earned. It *does* write this file — at a fixed internal path,
+        # never one a caller chooses, which is the property that decides the bucket.
+        "device_tracker": "dev_id — matched 'known_devices.yaml'; see writes that file at a fixed internal path",
+    }
+
+    import json
+
+    pathy = re.compile(r"(^|_)(file|filename|path|dir|directory|destination)$|^(file|filename|path)")
+    # Deliberately loose: it is cheaper to bucket a false positive with a reason than to be blind to
+    # a path field named `output` or `store_to`. Every addition it makes gets classified below.
+    path_language = re.compile(
+        # Prose tokens, **and a literal filename with an extension**. The second half is not
+        # decoration: `device_tracker.see.dev_id` is described as "find the ID in
+        # `known_devices.yaml`" — a real file, named, with not one prose token in the sentence. A
+        # pattern loose on prose and blind to filenames is loose in the wrong dimension.
+        r"\b(path|file|folder|directory|filename|saved?|written?|stored?)\b"
+        r"|[\w./-]+\.(ya?ml|json|txt|csv|db|log|conf|ini|png|jpe?g|mp3|wav)\b",
+        re.I,
+    )
+    reference = re.compile(r"^\[%key:(.+)%\]$")
+    root = pathlib.Path(ha_components.__file__).parent
+
+    _strings: dict[str, dict] = {}
+
+    def strings_for(domain: str) -> dict:
+        if domain not in _strings:
+            path = root / domain / "strings.json"
+            try:
+                _strings[domain] = json.loads(path.read_text()) if path.exists() else {}
+            except Exception:  # noqa: BLE001
+                _strings[domain] = {}
+        return _strings[domain]
+
+    def resolve(text: object, depth: int = 0) -> str:
+        """A description, following `[%key:...%]` to the entry it points at.
+
+        602 of the 2400 descriptions are references rather than words. A reader that does not
+        follow them sees a placeholder, finds no path language, and reports a clean result — the
+        same blindness as reading `services.yaml`, one layer further in.
+        """
+        match = reference.match(str(text or ""))
+        if not match or depth > 5:
+            return str(text or "")
+        parts = match.group(1).split("::")
+        if len(parts) < 3 or parts[0] != "component":
+            return ""
+        node: object = strings_for(parts[1])
+        for key in parts[2:]:
+            node = node.get(key) if isinstance(node, dict) else None
+        return resolve(node, depth + 1) if node else ""
+
+    found: dict[str, list[str]] = {}
+    described = unresolved = 0
+    for services_yaml in sorted(root.glob("*/services.yaml")):
+        domain = services_yaml.parent.name
+        try:
+            data = yaml.safe_load(services_yaml.read_text()) or {}
+        except Exception:  # noqa: BLE001 - a component we cannot parse is not our concern
+            continue
+        service_strings = strings_for(domain).get("services") or {}
+        fields: list[str] = []
+
+        def walk(node: object, service: str | None = None) -> None:
+            nonlocal described, unresolved
+            if not isinstance(node, dict):
+                return
+            for key, value in node.items():
+                if key == "fields" and isinstance(value, dict):
+                    for field, spec in value.items():
+                        if pathy.search(str(field)):
+                            fields.append(field)
+                        else:
+                            raw = (((service_strings.get(service) or {}).get("fields") or {}).get(field) or {}).get("description", "")
+                            text = resolve(raw)
+                            # Branch on the **input** and check the **output**, so a resolver that
+                            # returns its argument unchanged is detected. Branching on `text` first
+                            # made the `unresolved` counter unreachable the moment `resolve` stopped
+                            # resolving — a guard that could not fail for the deletion it existed to
+                            # catch, which is the class this whole file is about (#227 review).
+                            if reference.match(str(raw)):
+                                if text and not reference.match(str(text)):
+                                    described += 1
+                                else:
+                                    unresolved += 1
+                            elif str(raw).strip():
+                                described += 1
+                            if text and path_language.search(text):
+                                fields.append(field)
+                        # **Recurse.** A field may itself hold `fields` — HA's collapsible sections.
+                        # Twenty domains nest fields that way, `smtp`'s `attachments.filename`
+                        # among them, and stopping at the first level made every one invisible.
+                        if isinstance(spec, dict):
+                            walk(spec, service)
+                elif isinstance(value, dict):
+                    walk(value, key if service is None else service)
+
+        walk(data)
+        if fields:
+            found[domain] = sorted(set(fields))
+
+    # **The guard.** Reading `services.yaml` for descriptions returns 9 non-empty out of 2275 —
+    # a scan over it is blind, not strict, and loosening its regex cannot help. Assert the corpus
+    # this reads is actually populated and fully resolved, so neither blindness recurs silently.
+    assert described > 1000, f"only {described} resolved field descriptions — this scan is reading the wrong place"
+    assert unresolved == 0, f"{unresolved} `[%key:...%]` references did not resolve; a quarter of the corpus is placeholders"
+
+    classified = set(REFUSED_AT_SETUP) | set(REFUSED_AT_CALL) | set(GATED_BY_HA) | set(ON_A_REMOTE_FILESYSTEM)
+    unclassified = sorted(set(found) - classified)
+    assert not unclassified, (
+        "Home Assistant has service(s) taking a file path that nothing here classifies: "
+        f"{ {d: found[d] for d in unclassified} }. Put each in exactly one bucket with a reason — "
+        "refused at setup, refused at call, gated by HA on a named field, or writing to a remote "
+        "filesystem. There is deliberately no accepted-risk bucket."
+    )
+
+    # **Teeth.** A bucket is a claim. Without these the whole fix reverts green: a reviewer deleted
+    # `downloader` from `DENIED_DOMAINS`, emptied `REFUSED_AT_SETUP` and refiled it under
+    # `GATED_BY_HA` with an invented reason, and 278 tests passed — because `set(X) <= Y` is
+    # vacuously true for an empty X and buckets 3 and 4 are unverified free text.
+
+    # 1. **Hardcoded, not read from the tables above.** This is the assertion that actually stops a
+    #    revert, and it took two attempts: a first version asserted the tables were non-empty and
+    #    checked their claims against the code, which still let the reviewer delete `downloader`
+    #    from `DENIED_DOMAINS`, drop it from both refused maps and refile it under `GATED_BY_HA`
+    #    with an invented reason — every table-driven assertion passed, because removing a claim
+    #    removes its check. A check that reads the thing it is checking cannot detect its deletion.
+    assert "downloader" in DENIED_DOMAINS, "#227's setup axis has been reverted"
+    assert "local_file" in DENIED_DOMAINS, "#227's setup axis has been reverted for local_file"
+    # `upb` is the third, and the only one the scan below could never have surfaced: its
+    # services.yaml declares no path field, so the danger is entirely in the config flow.
+    assert "upb" in DENIED_DOMAINS, "#227's setup axis has been reverted for upb"
+    # **Deletion, not only renaming.** The existence assertions below punish a rename and permit a
+    # deletion — and ten of sixteen domain entries deleted with the suite green, including
+    # `python_script` and `hassio`, two of the four host-level domains invariant 1 rests on. A
+    # failure message saying "find the new name rather than removing the entry" is guidance; this
+    # is the check. Named literally, because a check that reads its own table cannot see the table
+    # shrink.
+    for domain in ("shell_command", "python_script", "hassio", "backup"):
+        assert domain in HOST_SERVICE_DOMAINS, f"{domain} dropped from HOST_SERVICE_DOMAINS"
+        assert domain in DENIED_ACTION_DOMAINS, f"{domain} dropped from DENIED_ACTION_DOMAINS"
+
+    # **Every** member, not the four this PR happened to name. Pinning only the four it touched
+    # left ten of sixteen deletable with the suite green — `device_tracker` the sharpest, because
+    # it is pinned in `DENIED_ENTITY_DOMAINS` and was not here, so deleting it made
+    # `device_tracker.see` callable: the very service this file classifies in bucket 4 for writing
+    # `known_devices.yaml`. "Pinned somewhere" is not pinned; each list needs its own teeth.
+    ALL_DENIED_ACTION_DOMAINS = (
+        "alarm_control_panel", "auth", "backup", "camera", "cloud", "device_tracker", "ffmpeg",
+        "hassio", "lock", "onboarding", "person", "python_script", "recorder", "shell_command",
+        "stream", "update",
+    )
+    for domain in ALL_DENIED_ACTION_DOMAINS:
+        assert domain in DENIED_ACTION_DOMAINS, (
+            f"{domain} is no longer a denied action domain. If Home Assistant renamed it, find the "
+            "new name and update the entry — deleting it is what makes this failure go away and "
+            "the hole come back."
+        )
+    # Ratchet: a denial added later must be pinned above too, or it inherits the same blind spot.
+    assert set(ALL_DENIED_ACTION_DOMAINS) == set(DENIED_ACTION_DOMAINS), (
+        "DENIED_ACTION_DOMAINS changed; add the new domain to ALL_DENIED_ACTION_DOMAINS so it is "
+        f"pinned literally. Unpinned: {sorted(set(DENIED_ACTION_DOMAINS) - set(ALL_DENIED_ACTION_DOMAINS))}"
+    )
+    for domain in ("lock", "alarm_control_panel", "camera", "device_tracker", "person"):
+        assert domain in DENIED_ENTITY_DOMAINS, f"{domain} dropped from DENIED_ENTITY_DOMAINS"
+    for domain in ("hearth_ai", "hassio", "backup", "homeassistant", "command_line", "shell_command", "python_script", "ffmpeg"):
+        assert domain in DENIED_DOMAINS, f"{domain} dropped from flows.DENIED_DOMAINS"
+    # Same correction on the service list: the four below are #227's, and eight others were
+    # deletable green — including the whole `homeassistant.*` family that AGENTS.md calls "refused
+    # everywhere, to everyone".
+    ALL_DENIED_ACTIONS = (
+        "automation.toggle", "automation.trigger", "automation.turn_off", "automation.turn_on",
+        "downloader.download_file", "homeassistant.reload_all", "homeassistant.reload_config_entry",
+        "homeassistant.reload_core_config", "homeassistant.restart", "homeassistant.set_location",
+        "homeassistant.stop", "homematicip_cloud.dump_hap_config", "local_file.update_file_path",
+        "logger.set_level", "persistent_notification.dismiss_all", "system_log.write",
+        "telegram_bot.download_file",
+    )
+    for service in ALL_DENIED_ACTIONS:
+        assert service in DENIED_ACTIONS, (
+            f"{service} is no longer denied. If it was renamed upstream, find the new name — "
+            "deleting the entry is what makes this failure go away and the hole come back."
+        )
+    assert set(ALL_DENIED_ACTIONS) == set(DENIED_ACTIONS), (
+        "DENIED_ACTIONS changed; add the new service to ALL_DENIED_ACTIONS so it is pinned "
+        f"literally. Unpinned: {sorted(set(DENIED_ACTIONS) - set(ALL_DENIED_ACTIONS))}"
+    )
+
+    # 2. Non-empty, so the subset assertions below cannot be satisfied by emptying a table.
+    assert REFUSED_AT_SETUP and REFUSED_AT_CALL
+
+    # 3. Every claim checked against the code that would have to enforce it.
+    assert set(REFUSED_AT_SETUP) <= DENIED_DOMAINS, sorted(set(REFUSED_AT_SETUP) - DENIED_DOMAINS)
+    for domain, service in REFUSED_AT_CALL.items():
+        assert service.split(".", 1)[0] == domain, (domain, service)
+        # The **exact service**, not the domain prefix: a prefix test passes `automation` on
+        # `automation.trigger` while `automation.reload` is correctly not denied.
+        assert service in DENIED_ACTIONS, f"{service} is claimed refused-at-call but is not in DENIED_ACTIONS"
+
+    # 4. The shapes themselves, so the classification cannot drift from the behaviour. These are
+    #    the #227 exploit and its siblings; if any starts passing, the fix has been reverted.
+    for shape in (
+        {"action": "downloader.download_file", "data": {"url": "http://x", "filename": "automations.yaml", "overwrite": True}},
+        {"action": "telegram_bot.download_file", "data": {"url": "http://x", "directory_path": "/config"}},
+        {"action": "local_file.update_file_path", "target": {"device_id": "abc"}, "data": {"file_path": "/etc/passwd"}},
+        {"action": "homematicip_cloud.dump_hap_config", "data": {"config_output_path": "/config/secrets.yaml"}},
+    ):
+        assert find_policy_violations({"actions": [shape]}) != [], shape
+
+    # 5. ...and the ordinary services of those same integrations still work, so this stays
+    #    service-level rather than quietly becoming a domain ban.
+    for allowed in ("homematicip_cloud.set_active_climate_profile", "telegram_bot.send_message"):
+        assert find_policy_violations({"actions": [{"action": allowed}]}) == [], allowed
+
+    # 6. Buckets 3 and 4 are mutually exclusive and neither may re-classify something refused.
+    assert not (set(GATED_BY_HA) & set(ON_A_REMOTE_FILESYSTEM))
+    refused = set(REFUSED_AT_SETUP) | set(REFUSED_AT_CALL)
+    assert not (refused & (set(GATED_BY_HA) | set(ON_A_REMOTE_FILESYSTEM))), "a refused domain is also filed as safe"
+
+    # 7. No dead entries: a classification for a domain the scan no longer finds is a stale claim,
+    #    which is how a renamed HA field leaves a reason nobody rechecks.
+    stale = sorted(classified - set(found))
+    assert not stale, f"classified but no longer surfaced by the scan: {stale}"
+
+
+def test_every_denied_action_still_exists_in_home_assistant() -> None:
+    """
+    A denial naming a service or domain Home Assistant no longer has is green and meaningless.
+
+    `DENIED_ACTIONS` is a list of literal strings. `assert "downloader.download_file" in
+    DENIED_ACTIONS` passes whether or not Home Assistant still calls it that — so if upstream
+    renames a service, the denial keeps passing while the real service runs undenied. That is the
+    same shape as the anti-revert teeth needing a hardcoded assertion: a check that only consults
+    our own side of the contract cannot notice the other side moving.
+
+    Checked against `services.yaml`, which is where a component declares what it offers. If this
+    fails, the service was renamed or removed upstream: find what it is called now and update the
+    denial — do **not** delete the entry, which is the reading that makes the failure go away and
+    the hole come back.
+    """
+    import pathlib
+
+    import homeassistant.components as ha_components
+    import yaml
+
+    root = pathlib.Path(ha_components.__file__).parent
+
+    # **Domains too.** A domain-level denial goes inert exactly the same way, and these carry the
+    # host-level four that invariant 1 rests on — `shell_command`, `python_script`, `hassio`,
+    # `backup` — plus the locks, cameras and location entities. A rename upstream would leave the
+    # list pointing at nothing while the real domain went undenied.
+    absent = sorted(
+        domain
+        for group in (DENIED_ACTION_DOMAINS, HOST_SERVICE_DOMAINS, DENIED_ENTITY_DOMAINS)
+        for domain in group
+        if not (root / domain).is_dir()
+    )
+    assert not absent, (
+        f"denied domains that no longer exist in Home Assistant: {absent}. Same rule as below — "
+        "find the new name, do not drop the entry."
+    )
+
+    missing = []
+    for action in sorted(DENIED_ACTIONS):
+        domain, service = action.split(".", 1)
+        services_yaml = root / domain / "services.yaml"
+        declared = False
+        if services_yaml.exists():
+            try:
+                declared = service in (yaml.safe_load(services_yaml.read_text()) or {})
+            except Exception:  # noqa: BLE001
+                declared = False
+        if not declared:
+            missing.append(action)
+    assert not missing, (
+        f"denied but no longer declared by Home Assistant: {missing}. The denial is now inert — "
+        "find the new name rather than removing the entry."
+    )

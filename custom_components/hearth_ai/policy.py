@@ -44,6 +44,36 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         # authored. `automations.set_enabled` is the one sanctioned path and it is an RPC method
         # under `automations.write`, checked and audited as itself — not a line a model can bury in
         # a script, where turning an automation off is how you quietly disarm someone else's rule.
+        # #227, the **call** axis. Denying `downloader` at setup only was half a fix: a household
+        # whose download directory is already the config directory — #227's own demonstrated
+        # configuration, reachable through the ordinary config flow — is still exposed, and the
+        # caller chooses both the path and the *content* via the URL. Strictly worse than the
+        # homematic clobber, which was denied here from the start.
+        "downloader.download_file",
+        # `raise_if_invalid_path(directory_path)` rejects `..` and **nothing else**: `/config` and
+        # `/etc/cron.d` both pass it (checked). The only `is_allowed_path` in the component guards
+        # `load_data`, the *outbound* send. `Path(custom_path).write_bytes(...)` at bot.py:1124 is
+        # the destination and is ungated, so this writes caller-chosen bytes to a caller-chosen
+        # host path with `automations.write` alone.
+        "telegram_bot.download_file",
+        # Redirects a `local_file` camera at any path `os.access(R_OK)` allows, and `camera_image`
+        # then serves that file's bytes. A host-level *read* rather than a write, refused for the
+        # same reason: invariant 1 does not distinguish. Only a literal `camera.*` target was
+        # caught before; `device_id`, `area_id` and `entity_id: all` were not, because this is not
+        # a fan-out action.
+        "local_file.update_file_path",
+        # Writes `Path(config_output_path)` with `write_text` and no `is_allowed_path`
+        # (`homematicip_cloud/services.py:313,319`). It cannot clobber an arbitrary file: line 312
+        # builds `f"{prefix}_{sgtin}.json"`, so every write ends `_<sgtin>.json` and `secrets.yaml`
+        # is unreachable. It is denied because **both** inputs are unvalidated `cv.string` — the
+        # prefix may carry `/` and `..`, and `config_output_path` is not checked at all — so the
+        # directory is caller-chosen even though the basename is not. Fixed content
+        # makes it a clobber rather than an injection, which changes the severity and not the
+        # classification: invariant 1 refuses host-level services everywhere, and a service that
+        # writes to a caller-chosen host path is host-level in effect. Service-level rather than
+        # domain-level on purpose — denying the domain would break legitimate Homematic control.
+        # Reachable with `automations.write`, which is **on by default** (#227).
+        "homematicip_cloud.dump_hap_config",
         "automation.trigger",
         "automation.turn_on",
         "automation.turn_off",

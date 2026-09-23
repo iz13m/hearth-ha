@@ -37,7 +37,87 @@ _LOGGER = logging.getLogger(__name__)
 # Integrations Hearth will not set up on the user's behalf: they grant host-level power, or
 # they are Hearth itself.
 DENIED_DOMAINS: frozenset[str] = frozenset(
-    {"hearth_ai", "hassio", "backup", "homeassistant", "command_line", "shell_command", "python_script", "ffmpeg"}
+    {
+        "hearth_ai",
+        "hassio",
+        "backup",
+        "homeassistant",
+        "command_line",
+        "shell_command",
+        "python_script",
+        "ffmpeg",
+        # Writes attacker-chosen bytes to an attacker-chosen path (#227). Its config flow asks only
+        # for a download directory and validates that the directory *exists* — so a model set it to
+        # the config directory and then overwrote `automations.yaml` with an automation that
+        # unlocked a door, which never passed a policy walker because it never went through the
+        # write path they sit on. Unlike every other file-writing integration, `downloader` decides
+        # its directory at **setup** rather than per call, which is why HA's own
+        # `is_allowed_path` never comes into it. See `test_every_path_writing_service_is_classified`.
+        "downloader",
+        # Same shape as `downloader`, on the same axis: its config flow takes `CONF_FILE_PATH`
+        # validated by `os.access` alone (`local_file/util.py:8`) — no `is_allowed_path` — and the
+        # resulting `camera.*` entity serves that file's bytes. The sibling `file` integration
+        # *does* gate its flow, so "Home Assistant will catch it" is not available here.
+        #
+        # Found because the classifier could not see this axis at all: it enumerates
+        # `*/services.yaml`, which is services only. A PR arguing "two axes, because one output
+        # hides half the class" had an instrument for one of them (#227 review).
+        "local_file",
+        # A third shape on the same axis: `CONF_FILE_PATH` is a raw
+        # `str` with no validator at all (distinct from the `SerialPortSelector` device field
+        # beside it), handed to `upb_lib` as `UPStartExportFile`.
+        #
+        # `config_ok` tests only that the path exists and is readable: `process_upstart_file`
+        # returns False solely on OSError, and a malformed file logs and returns early **without
+        # raising**, so the function still returns True. `/etc/hosts` passes.
+        #
+        # **What it is: a readability oracle for an arbitrary file, and disclosure only from a
+        # file the caller could already write.** An earlier version of this comment said "past
+        # that check the file's own bytes become entity names ... strictly worse than
+        # `local_file`". That is false, and backwards. `_process_file` requires line 1 to satisfy
+        # `fields[0] == BOF` (`"0"`), and thereafter only lines whose first field is a record type
+        # (`"2"` link, `"3"` device) contribute anything. An arbitrary secret has neither:
+        #
+        #     /etc/shadow style   -> returned=True  entities=[]
+        #     .env with a token   -> returned=True  entities=[]
+        #     crafted UPE file    -> returned=True  entities=['SECRET_FROM_HOST_FILE']
+        #
+        # So for a secret the caller does not control, `upb` answers only *does this path exist
+        # and can Home Assistant read it*. `local_file` is the one that serves a readable file's
+        # bytes; on that axis it is the more severe of the two, not the less. The error was
+        # generalising from a run against a **crafted** file — a valid demonstration of what a
+        # planted file does, which says nothing about an arbitrary one.
+        #
+        # Denied anyway, and each of these alone is sufficient: an ungated raw host path, a
+        # readability oracle over the whole filesystem, and full disclosure from a planted file
+        # (`parse_upstart.py:55` `link.name = fields[2]`; `:66,:68` `device.name`), read back
+        # through `list_entities`.
+        #
+        # **No hardware precondition.** An earlier reading of this said "reachable only with UPB
+        # hardware attached" — `connection.py:58-99` retries forever, so `config_flow.py:45` looked
+        # unreachable without a PIM. That is false, and the whole chain is caller-controlled:
+        # `CONF_DEVICE` is a `SerialPortSelector`, which does **not** validate that the value names
+        # a device, and `upb_lib` hands it to `serialx`, which honours the pyserial URL family. A
+        # `socket://host:port` pointing at any listening TCP port satisfies `connect()` — the box's
+        # own `:8123`, anything on its LAN. So `upb` is reachable with `integrations.manage` alone:
+        # the `downloader` class, not a niche one.
+        #
+        # Re-runnable in two commands rather than re-derived (`uv run --with homeassistant
+        # --with upb_lib`):
+        #   SerialPortSelector({})("socket://127.0.0.1:8123")   -> returned unchanged, no error
+        #   UpbPim({"url": "socket://127.0.0.1:<any listener>"}).async_connect()
+        #                                                       -> returns, is_connected() True
+        # Verified on the **async** path `upb_lib` actually calls (`open_serial_connection`), not
+        # the sync `serial_for_url` helper. Note what that run did and did not show: it used a
+        # crafted UPE file, so it establishes reachability and planted-file disclosure, and it is
+        # the run that was over-read into the severity claim corrected above.
+        #
+        # Invisible to `test_every_path_writing_service_is_classified`, whose scan globs
+        # `*/services.yaml`: upb declares services, but none of them takes a path. The danger is
+        # entirely in the config flow. Established by reading `upb_lib` rather than assuming a
+        # bound — see `RESEARCH/HEARTH_UPB_SETUP_AXIS/FINDINGS.md`.
+        "upb",
+    }
 )
 
 # Field names that hold credentials even when the schema does not say so (older flows use a

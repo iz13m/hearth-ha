@@ -51,6 +51,40 @@ async def test_refuses_hearth_itself_and_host_level_integrations(core: HomeAssis
         assert i["domain"] != "hearth_ai"
 
 
+async def test_refuses_the_path_disclosure_integrations_end_to_end(core: HomeAssistant) -> None:
+    """#227's and #256's setup axis, exercised through the dispatcher rather than asserted.
+
+    Every other check on these three is **membership**: the anti-revert teeth in `test_policy.py`
+    assert `"downloader" in DENIED_DOMAINS`, and `integrations.available` filters on the same set.
+    So a refactor of `check_domain` that stopped consulting `DENIED_DOMAINS` would leave all of
+    them green while all three denials went inert — the shape that let `find_service_call_violations`
+    regress with two walker corpora passing beside it. This is the only test that makes the refusal
+    happen, and the test above covers `hearth_ai`/`hassio`/`shell_command` but never these.
+
+    **Three enforcers, not one** — the enumeration was wrong twice, each time because the query
+    matched the data rather than the behaviour:
+
+        integrations.py:102  integrations_flow_start  check_domain(params["domain"])
+        integrations.py:120  integrations_flow_step   check_domain(flow["handler"])   re-derived
+        helpers.py:147       _flow_domains            `d not in DENIED_DOMAINS`, 6 call sites
+
+    `_flow_domains` enforces the setup denial **without going through `check_domain`** and refuses
+    with `not_found` rather than `method_not_allowed`. No behaviour change for these three (none
+    is a helper flow — checked: `async_get_config_flows(hass, "helper")` excludes all of them),
+    but a fourth enforcer would not be surprising: grepping readers of `DENIED_DOMAINS` misses
+    `integrations_flow_step`, which never mentions the set, and grepping callers of `check_domain`
+    misses `_flow_domains`, which never calls it.
+    """
+    d = build_dispatcher(core, CAPS)
+    for domain in ("downloader", "local_file", "upb"):
+        assert domain in DENIED_DOMAINS, domain
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch("integrations.flow_start", {"domain": domain})
+        # Refused for *being denied*, not for being unknown or malformed — `not_found` here would
+        # mean the check never ran and HA simply had no such integration.
+        assert ei.value.code == "method_not_allowed", (domain, ei.value.code)
+
+
 async def test_unknown_domain(core: HomeAssistant) -> None:
     d = build_dispatcher(core, CAPS)
     with pytest.raises(RpcError) as ei:
