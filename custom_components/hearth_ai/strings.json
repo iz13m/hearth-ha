@@ -81,7 +81,7 @@
       },
       "assistant": {
         "title": "Assistant mode and model",
-        "description": "Hearth subscription: {tier} (active: {active}, renews {period_end}). Manage it at {dashboard_url}.\n\n**Managed** answers inside Home Assistant Assist using the Hearth subscription. **Bring your own AI** means you talk to Claude, ChatGPT, or Gemini directly and add this connector to it: {mcp_url} (see the dashboard for setup steps). **Off** removes the in-HA assistant. Model list: {models_source}.",
+        "description": "Hearth subscription: {plan} (active: {active}, renews {period_end}). Subscribe or manage it in the Hearth app.\n\n**Managed** answers inside Home Assistant Assist using the Hearth subscription. **Bring your own AI** means you talk to Claude, ChatGPT, or Gemini directly and add this connector to it: {mcp_url} (see the dashboard for setup steps). **Off** removes the in-HA assistant. Model list: {models_source}.",
         "data": {
           "assistant_mode": "Assistant mode",
           "model": "Model for the Managed assistant"

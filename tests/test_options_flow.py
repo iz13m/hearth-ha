@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -108,13 +111,13 @@ async def test_assistant_step_live_and_offline(hass: HomeAssistant, entry: MockC
     client = entry.runtime_data.client
     client.connected = True
     client.async_call = AsyncMock(
-        return_value={"tier": "managed", "active": True, "status": "active", "period_end": "2026-10-04T00:00:00Z", "models": ["claude-opus-5", "claude-sonnet-5"], "default_model": "claude-opus-5", "dashboard_url": "https://h/app", "mcp_url": "https://h/mcp"}
+        return_value={"plan": "family", "managed": True, "active": True, "status": "active", "period_end": "2026-10-04T00:00:00Z", "models": ["claude-opus-5", "claude-sonnet-5"], "default_model": "claude-opus-5", "dashboard_url": "https://h/app", "mcp_url": "https://h/mcp"}
     )
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "assistant"})
     assert result["type"] is FlowResultType.FORM
     ph = result["description_placeholders"]
-    assert ph["tier"] == "managed" and ph["active"] == "yes" and ph["period_end"] == "2026-10-04" and ph["models_source"] == "live"
+    assert ph["plan"] == "family" and ph["active"] == "yes" and ph["period_end"] == "2026-10-04" and ph["models_source"] == "live"
     assert ph["mcp_url"] == "https://h/mcp"
 
     # the model selector only offers what the hub allows (an unknown value is rejected by the schema itself)
@@ -135,7 +138,7 @@ async def test_assistant_step_live_and_offline(hass: HomeAssistant, entry: MockC
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "assistant"})
     assert result["description_placeholders"]["models_source"] == "offline defaults"
-    assert result["description_placeholders"]["tier"] == "unknown"
+    assert result["description_placeholders"]["plan"] == "unknown"
 
     # hub error -> static defaults too
     entry.runtime_data.client.connected = True
@@ -143,3 +146,21 @@ async def test_assistant_step_live_and_offline(hass: HomeAssistant, entry: MockC
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "assistant"})
     assert result["description_placeholders"]["models_source"] == "offline defaults"
+
+
+def test_assistant_description_has_no_literal_escapes() -> None:
+    """A `\\n` that survived JSON escaping renders to the customer as visible backslash-n.
+
+    The description is the one long piece of prose the options flow shows, and it is written in two
+    files that must agree. Nothing asserted its text until a review caught exactly that escape.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1] / "custom_components" / "hearth_ai"
+    texts = []
+    for name in ("strings.json", "translations/en.json"):
+        data = json.loads((root / name).read_text(encoding="utf-8"))
+        text = data["options"]["step"]["assistant"]["description"]
+        assert "\\n" not in text, f"{name}: literal backslash-n in the description"
+        assert "\n\n" in text, f"{name}: the paragraph break was lost"
+        assert "{plan}" in text and "{tier}" not in text, f"{name}: still names the old tier"
+        texts.append(text)
+    assert texts[0] == texts[1], "strings.json and translations/en.json disagree"

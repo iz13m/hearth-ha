@@ -208,7 +208,7 @@ class HearthOptionsFlow(OptionsFlowWithReload):
             data_schema=schema,
             errors=errors,
             description_placeholders={
-                "tier": str(account.get("tier") or "none"),
+                "plan": str(account.get("plan") or "none"),
                 "active": "yes" if account.get("active") else "no",
                 "period_end": str(period)[:10] if period else "—",
                 "dashboard_url": str(account.get("dashboard_url") or f"{hub_url}/app"),
@@ -234,7 +234,7 @@ class HearthOptionsFlow(OptionsFlowWithReload):
                 return {**result, "_live": True}
             except RpcError as err:
                 _LOGGER.debug("account.status unavailable: %s", err.message)
-        return {"tier": "unknown", "active": False, "period_end": None, "models": list(DEFAULT_MODELS), "default_model": DEFAULT_MODEL, "_live": False}
+        return {"plan": "unknown", "active": False, "period_end": None, "models": list(DEFAULT_MODELS), "default_model": DEFAULT_MODEL, "_live": False}
 
     def _save(self, changes: dict[str, Any]) -> ConfigFlowResult:
         return self.async_create_entry(data={**self.config_entry.options, **changes})
