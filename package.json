@@ -1,0 +1,9 @@
+{
+  "name": "@hearth/ha-integration",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Workspace member so `pnpm -r test` reaches the Python integration suite. The code here is Python; this file exists only to put scripts/test.sh behind the repo's own test entry point (#253). Verified by canary: a failing Python test makes `pnpm test` exit 1.",
+  "scripts": {
+    "test": "./scripts/test.sh"
+  }
+}
