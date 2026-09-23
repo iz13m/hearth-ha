@@ -340,3 +340,60 @@ async def test_switches_an_automation_on_and_off_without_ever_running_it(core: H
     with pytest.raises(RpcError) as ei:
         await d.dispatch("automations.set_enabled", {"id": "not-in-our-file", "enabled": False})
     assert ei.value.code == "not_found"
+
+
+async def test_refuses_the_scene_shorthand_that_activates_a_scene_setting_a_lock(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    The same bypass as #126, reached through an action *type* rather than a service (#228).
+
+    `{scene: "scene.gate"}` is not a service call at all — `cv.ACTIONS_MAP` maps `scene` to its own
+    action type and `determine_script_action` returns `"scene"` — so it activates a scene while
+    naming no service, and every check keyed on a service name skipped it. It is the one nested
+    shape generic recursion cannot catch, because the id it names is a *scene*, which is an allowed
+    reference; only resolving the scene's contents here reaches the lock.
+    """
+    core.states.async_set("scene.open_the_gate", "unknown", {"friendly_name": "Open the gate", "entity_id": ["lock.gate"]})
+    core.states.async_set("scene.movie_night", "unknown", {"friendly_name": "Movie night", "entity_id": ["light.hall"]})
+    d = build_dispatcher(core)
+
+    shorthand = {"alias": "Let me in", "sequence": [{"scene": "scene.open_the_gate"}]}
+    res = await d.dispatch("scripts.validate", {"key": "let_me_in", "config": shorthand})
+    assert res["ok"] is False and res["status"] == "policy"
+    assert "lock.gate" in res["error"]
+    with pytest.raises(RpcError):
+        await d.dispatch("scripts.create", {"key": "let_me_in", "config": shorthand})
+
+    # Buried in a branch, reached through the default-on automation capability.
+    buried = {
+        "alias": "Quietly",
+        "triggers": [{"trigger": "state", "entity_id": "input_boolean.test", "to": "on"}],
+        "actions": [{"choose": [{"conditions": [], "sequence": [{"scene": "scene.open_the_gate"}]}]}],
+    }
+    res = await d.dispatch("automations.validate", {"config": buried})
+    assert res["ok"] is False and res["status"] == "policy"
+
+    # Mixed case, for the same reason #220 folds: HA lower-cases the id itself.
+    mixed = {"alias": "Shout", "sequence": [{"scene": "Scene.Open_The_Gate"}]}
+    res = await d.dispatch("scripts.validate", {"key": "shout", "config": mixed})
+    assert res["ok"] is False and res["status"] == "policy"
+
+    # `all` through the shorthand: ENTITY_MATCH_ALL is every scene in the house, including the gate
+    # one. Covered today only because the shorthand normalises to `scene.turn_on` and inherits that
+    # rule — pinned here so a change to the normalisation cannot drop it silently. Folded, since HA
+    # lower-cases the id itself (#220).
+    # `comp_entity_ids` is `Any(All(Lower, Any("all", "none")), entity_ids)` — the sentinel is
+    # **case-insensitive**, so `ALL` folds to `all` and must be refused with it.
+    for value in ("all", "ALL"):
+        res = await d.dispatch("scripts.validate", {"key": "everything", "config": {"alias": "All", "sequence": [{"scene": value}]}})
+        assert res["ok"] is False and res["status"] == "policy", value
+    # `none` is the other sentinel. It is **also** refused — not by the `all` rule but by the
+    # pre-existing "only a named scene entity may be activated" one, which predates #228. Pinned as
+    # it actually behaves rather than as I first assumed: refusing it is over-refusal of a no-op,
+    # which costs a household nothing real, and special-casing a sentinel that selects nothing would
+    # add a branch to buy nothing. If that ever changes, this test says so deliberately.
+    res_none = await d.dispatch("scripts.validate", {"key": "nothing", "config": {"alias": "None", "sequence": [{"scene": "none"}]}})
+    assert res_none["ok"] is False and "only a named scene" in res_none["error"], res_none
+
+    # A benign scene through the shorthand still works — this narrows, it does not ban the shape.
+    ok = {"alias": "Film", "sequence": [{"scene": "scene.movie_night"}]}
+    assert (await d.dispatch("scripts.validate", {"key": "film", "config": ok}))["ok"] is True

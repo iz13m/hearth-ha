@@ -9,12 +9,14 @@ from pathlib import Path
 import pytest
 
 from custom_components.hearth_ai.policy import (
+    TARGET_BEARING_KEYS,
     DENIED_ACTION_DOMAINS,
     DENIED_ACTIONS,
     DENIED_ENTITY_DOMAINS,
     HOST_SERVICE_DOMAINS,
     REFERENCEABLE_DENIED_DOMAINS,
     _fold,
+    _service_name,
     find_policy_violations,
     find_reference_violations,
     find_scene_policy_violations,
@@ -252,3 +254,139 @@ def test_the_service_call_walkers_agree_on_every_shared_case() -> None:
     for case in cases:
         i = case["input"]
         assert find_service_call_violations(i["domain"], i["service"], i["entityIds"]) == case["violations"], case["name"]
+
+
+def test_our_key_set_matches_home_assistants_service_schema() -> None:
+    """
+    Every key `cv.SERVICE_SCHEMA` declares is one we have classified (#228).
+
+    This is the fix for the *class*, not the instance. `service_template` was not a key we
+    overlooked — the schema states there are exactly two ways to name a service, as `vol.Exclusive`
+    members of one group with `has_at_least_one_key` requiring one of them, and we read one. Any
+    hand-maintained key list repeats that in a year.
+
+    Asserts a **subset**, and names the offender: a count (`len(...) == 8`) passes when Home
+    Assistant swaps one key for another, which is the same coverage-not-logic failure as every other
+    gate in #220. If this fails, decide which bucket the new key belongs in — do not widen the
+    ignore list to make it pass.
+    """
+    import homeassistant.helpers.config_validation as cv
+    import voluptuous as vol
+
+    names = set()
+    for marker in cv.SERVICE_SCHEMA.validators[1].schema:
+        names.add(str(getattr(marker, "schema", marker)))
+
+    names_a_service = {"action", "service", "service_template"}
+    carries_entities = set(TARGET_BEARING_KEYS) | {"entity_id"}
+    # Presentation and control flow, from SCRIPT_ACTION_BASE_SCHEMA, plus two that name no entity.
+    # `enabled: false` means an action does not run; it is safe to *read* such a node and refuse it,
+    # and would only need handling if this walk ever started resolving rather than reading.
+    not_executable = {"alias", "note", "continue_on_error", "enabled", "response_variable", "metadata"}
+
+    unclassified = names - names_a_service - carries_entities - not_executable
+    assert not unclassified, (
+        f"cv.SERVICE_SCHEMA declares {sorted(unclassified)}, which the policy walk does not classify. "
+        "Home Assistant may execute it; decide which bucket it belongs in."
+    )
+    # And the two halves we rely on are really still there.
+    assert names_a_service & names == {"action", "service_template"}, sorted(names)
+    assert {"target", "data", "data_template", "entity_id"} <= names, sorted(names)
+
+
+def test_every_action_key_home_assistant_knows_is_classified() -> None:
+    """
+    Every key in `cv.ACTIONS_MAP` is one the walk reads, or one we have declared inert (#228).
+
+    **Key level, deliberately, and the count is the argument.** `ACTIONS_MAP` has 21 keys mapping to
+    16 types; three of those keys mean `call_service` and the walk read two. So a *type*-level
+    completeness assertion — "do we handle `call_service`?" — passes while `service_template` sits
+    unread inside it. That assertion is the one I wrote first, and it would have been the fifth
+    coverage-not-logic failure of the night, inside the fix for the fourth.
+
+    `scene` is the same defect one row down: `{scene: "scene.gate"}` activates a scene and names no
+    service, so every check keyed on a service name skipped it.
+
+    Fails naming the offending key. Do not widen `INERT` to make it pass — decide what the key does.
+
+    **And answering this test is not sufficient on its own.** It tells you whether Home Assistant
+    added a key the walk does not read. It cannot tell you whether *reading* that key is enough:
+
+        A shape is caught by the existing walk if and only if it names the denied thing.
+        A shape that names an allowed **container** whose contents reach the denied thing needs a
+        resolver, and no amount of regex or key enumeration substitutes for one.
+
+    That is why `{scene: "scene.gate"}` needed `find_nested_scene_violations` and not merely a place
+    in the read set: it names a *scene*, which is a perfectly allowed reference. Every other nested
+    shape swept at 2026.9.3 — device triggers in `wait_for_trigger`, entity ids in `event` data —
+    names its denied domain directly, so recursion plus the reference and device-shape checks reach
+    them.
+
+    Home Assistant gives a config four containers, and each needs its own mechanism:
+
+    | container        | reached by                                        | mechanism                       |
+    |------------------|---------------------------------------------------|---------------------------------|
+    | scene            | `scene.turn_on`, `scene.apply` keys, `scene:`      | resolve contents here (#220/228)|
+    | script           | `script.turn_on`, the implicit `script.<id>`       | resolver, fail closed (#225)    |
+    | blueprint        | `use_blueprint`, carrying no actions at all        | walk the validated config (#226)|
+    | indirect target  | `area_id` / `label_id` / `floor_id` / `device_id`  | refuse where the action fans out|
+    | automation       | `automation.turn_on|trigger|toggle`, and the alias | **blanket denial** (AgDR-0042)  |
+
+    **The automation row's mechanism is different from the rest, and that is a trap.** An automation
+    is a bag of actions, so it is structurally a container like a scene or a script — but nothing
+    resolves its contents. It is safe only because `automation.trigger|turn_on|turn_off|toggle` are
+    in `DENIED_ACTIONS` outright and `automations.set_enabled` is the one sanctioned path. So:
+    **narrowing the blanket denial for `automation.*` — to permit some benign automation service, or
+    to let a model pause a schedule — requires building a resolver first.** The container rule above
+    will not stop that change, because the key is already read; only this note will.
+
+    Five containers, three mechanisms (resolver, validated config, blanket denial) plus the fan-out
+    rule for indirect targets. Complete against `ACTIONS_MAP` at 2026.9.3, not for all time — this assertion is what tells us
+    when that stops being true. A reader who has the key rule and not the container rule will add a
+    key to the read set and believe they are done.
+    """
+    import homeassistant.helpers.config_validation as cv
+
+    # Keys the walk reads, and where.
+    READ = {
+        "action", "service", "service_template",  # -> _service_name
+        "scene",                                  # -> _service_name, normalised to scene.turn_on
+        "device_id",                              # -> the device-shape rule (AgDR-0042)
+        "choose", "if", "repeat", "parallel", "sequence",  # -> _LIST_KEYS recursion
+        "condition", "and", "or", "not",                   # -> recursion; device conditions caught by shape
+        "wait_for_trigger",                                # -> recursion reaches a device trigger inside it
+    }
+    # Keys that run nothing and name no entity. A reason each, so widening this set is a decision.
+    INERT = {
+        "delay": "a duration",
+        "wait_template": "a template evaluated for truth; laundering through it is the documented-open gap",
+        "event": "fires an event on HA's bus; reaches no service and names no entity",
+        "variables": "binds names for later templates; template laundering is documented-open",
+        "stop": "halts the sequence",
+        # `enabled` also accepts a **template** (`Any(boolean, template)`). Neither walker reads it,
+        # so a disabled action is still walked — stricter than Home Assistant, and therefore not a
+        # bypass; both files checked rather than assumed. It is a loaded gun: the moment anyone adds
+        # "skip disabled actions" as an optimisation, `enabled: "{{ ... }}"` hides an action from the
+        # walk while HA runs it. Whoever adds that will be reading this table, not the thread.
+        "set_conversation_response": "sets a string returned to the caller",
+    }
+
+    unclassified = set(cv.ACTIONS_MAP) - READ - set(INERT)
+    assert not unclassified, (
+        f"cv.ACTIONS_MAP has keys {sorted(unclassified)} the policy walk neither reads nor declares "
+        "inert. Home Assistant may execute them; classify each rather than widening INERT."
+    )
+    # **Teeth.** "Do not widen INERT" is a comment, not a check: moving `scene` from READ to INERT
+    # and deleting the normalisation left this test green, and only `test_handlers.py` caught it.
+    # So assert each READ key is *actually read* rather than merely listed.
+    for key in ("action", "service", "service_template"):
+        assert _fold(str(_service_name({key: "Lock.Unlock"}))) == "lock.unlock", key
+    assert _fold(str(_service_name({"scene": "scene.gate"}))) == "scene.turn_on"
+    assert find_policy_violations({"actions": [{"device_id": "a", "domain": "lock", "type": "unlock"}]}) != []
+    for key in ("target", "data", "data_template"):
+        assert find_policy_violations({"actions": [{"action": "homeassistant.turn_off", key: {"area_id": "k"}}]}) != [], key
+
+    # And the spellings we depend on have not been renamed underneath us.
+    assert {k for k, v in cv.ACTIONS_MAP.items() if v == "call_service"} == {"action", "service", "service_template"}
+    assert {k for k, v in cv.ACTIONS_MAP.items() if v == "scene"} == {"scene"}
+    assert {k for k, v in cv.ACTIONS_MAP.items() if v == "device"} == {"device_id"}

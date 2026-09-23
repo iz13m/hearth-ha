@@ -14,7 +14,7 @@ from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from ..policy import _fold, DENIED_ENTITY_DOMAINS, _entity_ids, find_policy_violations, find_reference_violations, find_scene_policy_violations
+from ..policy import TARGET_BEARING_KEYS, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import _exposed
@@ -156,13 +156,13 @@ async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list
         # `Scene.Turn_On` would otherwise walk straight past the one check that reads what a scene
         # holds (AgDR-0012). The `homeassistant.turn_on` alias needs no branch here — the fan-out
         # rule refuses it at a scene outright, before this check is reached (#220).
-        if _fold(str(node.get("action", node.get("service")) or "")) != f"{SCENE_DOMAIN}.turn_on":
+        if _fold(str(_service_name(node) or "")) != f"{SCENE_DOMAIN}.turn_on":
             continue
         target = node.get("target") if isinstance(node.get("target"), dict) else {}
         for key in _UNRESOLVABLE_TARGET_KEYS:
             if key in target or key in node:
                 problems.append(f"scene.turn_on by {key}: Hearth cannot tell which scenes that would activate")
-        for eid in _entity_ids(target) + _entity_ids(node.get("data")) + _entity_ids(node):
+        for eid in [i for k in TARGET_BEARING_KEYS for i in _entity_ids(node.get(k))] + _entity_ids(node) + _entity_ids({"entity_id": node.get("scene")}):
             if eid in checked:
                 continue
             checked.add(eid)

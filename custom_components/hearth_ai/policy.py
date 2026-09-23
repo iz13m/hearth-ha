@@ -116,14 +116,79 @@ def _fold(value: Any) -> str:
 
 
 def _entity_ids(target: Any) -> list[str]:
+    """The entity ids a service-call node names, read as Home Assistant reads them (#228).
+
+    **Comma-split**, because `cv.comp_entity_ids` is: on the pinned 2026.9.3,
+    `comp_entity_ids("input_boolean.test, automation.security")` returns both ids. Taking the string
+    whole meant the walk saw one harmless entity while HA acted on two.
+    """
     if not isinstance(target, dict):
         return []
     v = target.get("entity_id")
     if isinstance(v, str):
-        return [v]
+        return [x.strip() for x in v.split(",") if x.strip()]
     if isinstance(v, list):
-        return [x for x in v if isinstance(x, str)]
+        return [x.strip() for x in v if isinstance(x, str)]
     return []
+
+
+def _service_name(node: dict[str, Any]) -> Any:
+    """How a service-call node names the service it runs, per `cv.SERVICE_SCHEMA` (#228).
+
+    `action` and `service_template` are `vol.Exclusive` members of one `"service name"` group, and
+    `has_at_least_one_key(CONF_ACTION, CONF_SERVICE_TEMPLATE)` requires one of them — so
+    `service_template` is not a legacy alias to overlook, it is one of exactly two ways the schema
+    allows a service to be named. `service` is renamed to `action` upstream by
+    `_backward_compat_service_schema`, which is why it is read here and `service_template` survives
+    beside it. We read one of the two, which is why the same instruction was refused spelled
+    `action:` and ran spelled `service_template:`.
+    """
+    for key in ("action", "service", "service_template"):
+        # `is not None`, not `in`: TypeScript's `??` skips a null and falls through to the next
+        # spelling, so `{"action": null, "service_template": "lock.unlock"}` was refused on the hub
+        # and allowed here. JSON can express that, so it is a real mirror break even though Home
+        # Assistant rejects `None` at `cv.service` (#228 review).
+        if node.get(key) is not None:
+            return node[key]
+    # `cv.ACTIONS_MAP` maps those three to `call_service` and `scene` to its own action *type*: a
+    # `{scene: "scene.gate"}` node activates a scene while naming no service, so a check keyed on
+    # the service name never sees it. Normalised so every rule treats the shorthand as what it is.
+    if "scene" in node:
+        return "scene.turn_on"
+    return None
+
+
+# Every key of a service-call node that can carry the entities it acts on, per `cv.SERVICE_SCHEMA`.
+# `data_template` sits beside `data` in the schema and `template_complex` renders it the same way.
+# `SCRIPT_ACTION_BASE_SCHEMA` contributes only `alias`, `note`, `continue_on_error` and `enabled` —
+# enumerated, not assumed — and `response_variable`/`metadata` name no entities.
+TARGET_BEARING_KEYS = ("target", "data", "data_template")
+
+
+def _data_is_variables(action: str) -> bool:
+    """Whether `data` on this action is service data or a script's **variables** (#228 review).
+
+    Home Assistant has two paths: `script.turn_on` reads variables from
+    `service.data.get(ATTR_VARIABLES)`, so a legacy `entity_id`/`device_id` in its `data` really is
+    a target selector. The **per-script service** `script.<id>` passes `variables=service.data` —
+    the whole mapping becomes the script's variables and selects nothing. So refusing
+    `{action: "script.notify_phone", data: {device_id: "abc"}}` was over-refusal, and that is how
+    every "notify this device" script is invoked.
+    """
+    dom = _domain(action)
+    return dom == "script" and _fold(action).split(".", 1)[1] not in ("turn_on", "toggle", "reload", "turn_off")
+
+
+def _reach_decided_by_data(action: str) -> bool:
+    """Actions whose reach is decided by what is inside `data` rather than by the service name.
+
+    `cv.SERVICE_SCHEMA` gives `data`/`data_template` **two** alternatives —
+    `Any(template, All(dict, template_complex))` — and only the dict was read, so a whole-template
+    `data` contributed nothing to any structural check. That let the target *selection* be
+    laundered: `scene.apply` with `data="{{ {'entities': {'lo' ~ 'ck.front_door': ...}} }}"` set a
+    lock, and no regex can catch the `area_id` form because an area name is not an entity id.
+    """
+    return fans_out(action) or _fold(action) in ("scene.apply", "scene.create")
 
 
 def _scene_entity_ids(node: dict[str, Any]) -> list[str]:
@@ -219,7 +284,7 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
             return
         if not isinstance(node, dict):
             return
-        action = node.get("action", node.get("service"))
+        action = _service_name(node)
         if isinstance(action, str):
             # A templated action name is refused outright: the service it would call cannot be known
             # until it runs, and `_domain("{{ 'lock.unlock' }}")` is `{{ 'lock`, which matches nothing.
@@ -230,7 +295,7 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
                 problems.append(f"{p}: action {action} targets denied domain {dom}")
             if _fold(action) in DENIED_ACTIONS:
                 problems.append(f"{p}: action {action} is not allowed")
-            ids = _entity_ids(node.get("target")) + _entity_ids(node.get("data")) + _entity_ids(node)
+            ids = [i for k in TARGET_BEARING_KEYS for i in _entity_ids(node.get(k))] + _entity_ids(node) + _entity_ids({"entity_id": node.get("scene")})
             if dom == "scene":
                 ids += _scene_entity_ids(node)
             for eid in ids:
@@ -283,6 +348,37 @@ def fans_out(action: str) -> bool:
     return False
 
 
+def _target_selection(node: dict[str, Any], action: str) -> tuple[set[str], list[str], bool]:
+    """**One view of how an action selects what it touches**, from every carrier key (#228).
+
+    `target`, `data` and `data_template` are three spellings of target selection, and
+    `cv.SERVICE_SCHEMA` declares each as `Any(template, dict)` — two shapes behind one name. The
+    predicate had three call sites which then diverged: the templated form was refused on `target`
+    and invisible on the other two, so the same input laundered through a different spelling walked
+    past the rule. Normalise first, decide once; a fourth carrier key is then one line here.
+
+    Returns (keys, ids, unknowable). The dict alternative contributes keys and ids; the template
+    alternative contributes `unknowable`, which is what it is at authoring time (AgDR-0042).
+    """
+    keys: set[str] = set()
+    ids: list[str] = []
+    unknowable = False
+    # For the per-script service `script.<id>`, `data` is the script's variables rather than a
+    # target — see `_data_is_variables`. Its `target` still selects.
+    carriers = ("target",) if _data_is_variables(action) else TARGET_BEARING_KEYS
+    for key in carriers:
+        value = node.get(key)
+        if isinstance(value, str):
+            unknowable = True
+        elif isinstance(value, dict):
+            keys.update(str(k) for k in value)
+            ids.extend(_entity_ids(value))
+    keys.update(k for k in INDIRECT_TARGET_KEYS if k in node)
+    ids.extend(_entity_ids(node))
+    ids.extend(_entity_ids({"entity_id": node.get("scene")}))
+    return keys, ids, unknowable
+
+
 def find_fan_out_violations(action: str, node: dict[str, Any], ids: list[str], p: str) -> list[str]:
     """What a fan-out action may not carry: a target we cannot resolve, and so cannot check.
 
@@ -296,36 +392,36 @@ def find_fan_out_violations(action: str, node: dict[str, Any], ids: list[str], p
     asymmetry is exactly why this vector is open and that one is not.
     """
     problems: list[str] = []
+    keys, _sel_ids, unknowable = _target_selection(node, action)
+    # An unknowable selection is refused wherever the action's reach is decided by that selection
+    # rather than bounded by its own service name: `fans_out` **plus** `scene.apply`/`scene.create`,
+    # which are domain-bounded services whose data inlines entity states of any domain. Checked
+    # against `fans_out` rather than assumed — the predicate is phrased "not bounded by its own
+    # domain", which a scene service passes.
+    if unknowable and _reach_decided_by_data(action):
+        problems.append(
+            f"{p}: action {action} decides what it touches from its target, and that target is a "
+            "template; what it would reach cannot be known until it runs"
+        )
     if not fans_out(action):
         return problems
-    target = node.get("target") if isinstance(node.get("target"), dict) else {}
     for key in INDIRECT_TARGET_KEYS:
-        if key in target or key in node:
+        if key in keys:
             problems.append(f"{p}: action {action} decides what it touches from its target, so it may not use {key} — name the entities")
     for eid in ids:
-        # The same reasoning that refuses a templated *action* name, applied to the target: HA
-        # renders it at run time (`template.render_complex(conf, variables)` in
-        # `helpers/service.py`, checked against the pinned 2026.9.3), so `{{ 'scene.gate' }}` reads
-        # here as an ordinary string in no denied domain and is a scene by the time it runs. Only
-        # for an action that fans out — `light.turn_on` at a templated id still reaches only a light.
         if _TEMPLATE_RE.search(eid):
             problems.append(
-                f"{p}: action {action} decides what it touches from its target, and {eid} is a template; "
-                "what it would reach cannot be known until it runs"
+                f"{p}: action {action} decides what it touches from its target, and {eid} is a "
+                "template; what it would reach cannot be known until it runs"
             )
             continue
         ed = _domain(eid)
         if ed == _GROUP_DOMAIN:
             problems.append(f"{p}: action {action} aimed at {eid} reaches whatever that group holds, which is not knowable here")
-        # The alias is how `automation.turn_off` and `script.turn_on` come back under another name:
-        # both are refused as direct actions, and neither becomes safe for being reached indirectly.
         if ed in ROUTINE_DOMAINS and _domain(action) == "homeassistant":
             article = "an" if ed == "automation" else "a"
             problems.append(f"{p}: action {action} aimed at {eid} runs {article} {ed}; use activate_scene or run_script")
-    # Only the dispatcher: HA refuses it without a target anyway, but a target made only of keys we
-    # just refused would otherwise read as "no problem found". A per-script service such as
-    # `script.my_script` legitimately names no entities, which is why this is not general.
-    if not ids and _domain(action) == "homeassistant":
+    if not ids and not unknowable and _domain(action) == "homeassistant":
         problems.append(f"{p}: action {action} needs the entities it acts on named here")
     return problems
 
