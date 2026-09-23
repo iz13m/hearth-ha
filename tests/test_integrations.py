@@ -6,12 +6,15 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.data_entry_flow import FlowResultType
 
 from pytest_homeassistant_custom_component.common import MockModule, mock_config_flow, mock_integration, mock_platform
 
 from custom_components.hearth_ai.handlers.flows import DENIED_DOMAINS, is_secret, serialize_schema
+from custom_components.hearth_ai.handlers import flows
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 CAPS = frozenset({"integrations.manage"})
@@ -83,6 +86,99 @@ async def test_refuses_the_path_disclosure_integrations_end_to_end(core: HomeAss
         # Refused for *being denied*, not for being unknown or malformed — `not_found` here would
         # mean the check never ran and HA simply had no such integration.
         assert ei.value.code == "method_not_allowed", (domain, ei.value.code)
+
+
+async def test_the_setup_denylist_does_not_swallow_what_it_spared(core: HomeAssistant) -> None:
+    """The setup axis's over-refusal control — the mirror of teeth item 5 on the call axis (#257).
+
+    #227's load-bearing sentence is a **refusal to deny**: *do not deny the thirteen ungated config
+    flows; they are not one class, and denying them would spend `zwave_js`, `mqtt` and `zha` reach
+    on non-holes.* That ruling was enforced by nobody — adding `zha`, `velbus`, `zwave_js` and
+    `mqtt` to `DENIED_DOMAINS` left the whole suite green, so the product could refuse every serial
+    integration it has and nothing would go red.
+
+    **The assertion is "the refusal is not ours", not "the flow starts."** Three of the four cannot
+    start in this environment at all — `zha`, `velbus` and `zwave_js` depend on `usb`, which needs
+    `aiousbwatcher` — so asserting `type == "form"` would pin the presence of an optional dependency
+    rather than the denylist's width. `check_domain` runs first in `integrations_flow_start`, so any
+    error that is *not* `method_not_allowed` proves the domain got past our denial and failed on its
+    own terms. That is exactly the property at risk, and it holds whether or not the dep is there.
+    """
+    d = build_dispatcher(core, CAPS)
+
+    # Denied, by name — the other direction, kept in the same test so a reader sees the trade.
+    for domain in ("downloader", "local_file", "upb"):
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch("integrations.flow_start", {"domain": domain})
+        assert ei.value.code == "method_not_allowed", (domain, ei.value.code)
+
+    # Spared — deliberately not denied, and the denylist must not grow over them.
+    started: list[str] = []
+    for domain in ("zha", "velbus", "zwave_js", "mqtt"):
+        try:
+            result = await d.dispatch("integrations.flow_start", {"domain": domain})
+        except RpcError as err:
+            assert err.code != "method_not_allowed", (
+                f"{domain} is now refused at setup. #227 declined to deny the ungated serial and "
+                "broker flows on purpose — they are not one class with the path-writers. If this "
+                "is intentional, the decision belongs in a ruling, not in a widened denylist."
+            )
+        else:
+            started.append(domain)
+            await d.dispatch("integrations.flow_abort", {"flow_id": result["flow_id"]})
+
+    # Without this the test degenerates: if every spared flow failed for its own reasons it would
+    # still pass, and could no longer tell a spared domain from a broken harness.
+    assert started, "no spared flow started at all; this test can no longer distinguish the two"
+
+
+async def test_the_setup_denial_does_not_reach_an_existing_installation(core: HomeAssistant) -> None:
+    """Over-refusal in the other direction: a correct denial leaking into paths it never meant to
+    touch (#257).
+
+    The denial is meant to stop *setup*, not to hide a `local_file` camera a household already has.
+    `DENIED_DOMAINS` is read only on "what can be added" paths — `check_domain`,
+    `integrations_available`, `helpers._flow_domains` — and `integrations.list` filters on nothing.
+    That is a structural claim about three enforcers, and the enumeration behind it was wrong twice,
+    so it is asserted here as behaviour instead.
+    """
+    reg = er.async_get(core)
+    existing = {}
+    for platform, domain, uid in (("upb", "light", "u1"), ("downloader", "sensor", "d1"), ("local_file", "sensor", "l1")):
+        entry = reg.async_get_or_create(domain, platform, uid)
+        core.states.async_set(entry.entity_id, "on")
+        async_expose_entity(core, "conversation", entry.entity_id, True)
+        existing[platform] = entry.entity_id
+    await core.async_block_till_done()
+
+    d = build_dispatcher(core, frozenset({"entities.read", "integrations.manage"}))
+    listed = {e["entity_id"] for e in await d.dispatch("entities.list", {})}
+    for platform, entity_id in existing.items():
+        assert entity_id in listed, f"denying {platform} at setup hid an entity the household already has"
+        assert (await d.dispatch("states.get", {"entity_id": entity_id}))["state"] == "on", platform
+
+
+async def test_a_flow_opened_before_the_denial_landed_cannot_be_completed(core: HomeAssistant) -> None:
+    """`integrations_flow_step` re-derives the domain from `flow["handler"]` and re-checks it, so
+    the denial is "cannot start **and** cannot continue" (#257).
+
+    The window is real: a household part-way through a flow when the integration updates. It is
+    also the window that matters most for `upb`, whose disclosure happens at the final step — a
+    start-only denial would refuse the first step of a flow that was already past it.
+    """
+    d = build_dispatcher(core, CAPS)
+    start = await _start_fake_flow(core, d)          # allowed when it started
+    domain = start["domain"]
+    assert domain not in flows.DENIED_DOMAINS
+
+    original = flows.DENIED_DOMAINS
+    flows.DENIED_DOMAINS = original | {domain}       # ...and denied while it is open
+    try:
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch("integrations.flow_step", {"flow_id": start["flow_id"], "input": {"host": "192.168.1.50"}})
+        assert ei.value.code == "method_not_allowed", ei.value.code
+    finally:
+        flows.DENIED_DOMAINS = original
 
 
 async def test_unknown_domain(core: HomeAssistant) -> None:

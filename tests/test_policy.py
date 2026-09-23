@@ -863,10 +863,28 @@ def test_every_path_writing_service_is_classified() -> None:
         "DENIED_ACTION_DOMAINS changed; add the new domain to ALL_DENIED_ACTION_DOMAINS so it is "
         f"pinned literally. Unpinned: {sorted(set(DENIED_ACTION_DOMAINS) - set(ALL_DENIED_ACTION_DOMAINS))}"
     )
-    for domain in ("lock", "alarm_control_panel", "camera", "device_tracker", "person"):
+    # The remaining two lists, with the same ratchet the two above carry (#257). Pinning without a
+    # ratchet protects today's entries and not tomorrow's — and "unpinned because it was added
+    # later" is exactly the state that left ten domains and eight services deletable-green here.
+    ALL_DENIED_ENTITY_DOMAINS = ("alarm_control_panel", "camera", "device_tracker", "lock", "person")
+    for domain in ALL_DENIED_ENTITY_DOMAINS:
         assert domain in DENIED_ENTITY_DOMAINS, f"{domain} dropped from DENIED_ENTITY_DOMAINS"
-    for domain in ("hearth_ai", "hassio", "backup", "homeassistant", "command_line", "shell_command", "python_script", "ffmpeg"):
+    assert set(ALL_DENIED_ENTITY_DOMAINS) == set(DENIED_ENTITY_DOMAINS), (
+        "DENIED_ENTITY_DOMAINS changed; add the new domain to ALL_DENIED_ENTITY_DOMAINS so it is "
+        f"pinned literally. Unpinned: {sorted(set(DENIED_ENTITY_DOMAINS) - set(ALL_DENIED_ENTITY_DOMAINS))}"
+    )
+    ALL_SETUP_DENIED_DOMAINS = (
+        "backup", "command_line", "downloader", "ffmpeg", "hassio", "hearth_ai", "homeassistant",
+        "local_file", "python_script", "shell_command", "upb",
+    )
+    for domain in ALL_SETUP_DENIED_DOMAINS:
         assert domain in DENIED_DOMAINS, f"{domain} dropped from flows.DENIED_DOMAINS"
+    assert set(ALL_SETUP_DENIED_DOMAINS) == set(DENIED_DOMAINS), (
+        "flows.DENIED_DOMAINS changed; add the new domain to ALL_SETUP_DENIED_DOMAINS so it is "
+        "pinned literally — and add an over-refusal case to "
+        "`test_the_setup_denylist_does_not_swallow_what_it_spared` if the new denial is a "
+        f"judgement call. Unpinned: {sorted(set(DENIED_DOMAINS) - set(ALL_SETUP_DENIED_DOMAINS))}"
+    )
     # Same correction on the service list: the four below are #227's, and eight others were
     # deletable green — including the whole `homeassistant.*` family that AGENTS.md calls "refused
     # everywhere, to everyone".
