@@ -397,3 +397,242 @@ async def test_refuses_the_scene_shorthand_that_activates_a_scene_setting_a_lock
     # A benign scene through the shorthand still works — this narrows, it does not ban the shape.
     ok = {"alias": "Film", "sequence": [{"scene": "scene.movie_night"}]}
     assert (await d.dispatch("scripts.validate", {"key": "film", "config": ok}))["ok"] is True
+
+
+async def test_refuses_a_config_that_starts_a_script_reaching_a_lock(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    The last container without a mechanism (#225): a script is not checked when it runs (AgDR-0005).
+
+    `script.turn_on` at a script whose body unlocks a door is `scene.turn_on` before #126, one name
+    removed. The five shapes here are the ones #220 deferred — including the **per-script service**
+    `script.<id>`, which names no target at all, and the legacy `data`/top-level `entity_id` forms.
+
+    `script.evening` is the control that matters: `sceneSchedule.ts` compiles a converted scene's
+    schedule to exactly `script.turn_on` at a `script.*` id, so a blunt `script.*` refusal would
+    break Hearth's own feature. It must stay allowed.
+    """
+    (tmp_path / "scripts.yaml").write_text(
+        "gate_opener:\n"
+        "  alias: Gate opener\n"
+        "  sequence:\n"
+        "  - action: lock.unlock\n"
+        "    target:\n"
+        "      entity_id: lock.gate\n"
+        "evening:\n"
+        "  alias: Evening\n"
+        "  sequence:\n"
+        "  - action: light.turn_on\n"
+        "    target:\n"
+        "      entity_id: light.hall\n"
+    )
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+    d = build_dispatcher(core)
+
+    deferred = [
+        {"action": "script.turn_on", "target": {"entity_id": "script.gate_opener"}},
+        {"action": "script.toggle", "target": {"entity_id": "script.gate_opener"}},
+        {"action": "script.gate_opener"},
+        {"action": "script.turn_on", "data": {"entity_id": "script.gate_opener"}},
+        {"action": "script.turn_on", "entity_id": "script.gate_opener"},
+    ]
+    for node in deferred:
+        cfg = {"alias": "Let me in", "triggers": [{"trigger": "time_pattern", "seconds": "/5"}], "actions": [node]}
+        res = await d.dispatch("automations.validate", {"config": cfg})
+        assert res["ok"] is False and res["status"] == "policy", node
+        assert "lock.gate" in res["error"], node
+
+    # Mixed case, and buried in a branch.
+    buried = {"alias": "Quietly", "triggers": [{"trigger": "sun", "event": "sunset"}],
+              "actions": [{"choose": [{"conditions": [], "sequence": [{"action": "Script.Turn_On", "target": {"entity_id": "Script.Gate_Opener"}}]}]}]}
+    assert (await d.dispatch("automations.validate", {"config": buried}))["ok"] is False
+
+    # Fail closed: a script Home Assistant does not have cannot be checked, so it is refused.
+    missing = {"alias": "Ghost", "sequence": [{"action": "script.turn_on", "target": {"entity_id": "script.not_loaded"}}]}
+    res = await d.dispatch("scripts.validate", {"key": "ghost", "config": missing})
+    assert res["ok"] is False and res["status"] == "policy"
+    assert "does not have" in res["error"]
+
+    # THE control: #132's converted-scene schedule must still be writable.
+    schedule = {
+        "alias": "Evening at sunset",
+        "triggers": [{"trigger": "sun", "event": "sunset"}],
+        "actions": [{"action": "script.turn_on", "target": {"entity_id": "script.evening"}}],
+    }
+    assert (await d.dispatch("automations.validate", {"config": schedule}))["ok"] is True
+
+
+async def test_a_script_raw_config_is_blueprint_expanded_but_not_validated(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    The Home Assistant behaviour #225's resolver depends on, and it is the opposite of #226's.
+
+    **Scripts:** `raw_config` is already blueprint-**expanded**, so one pass over it sees the
+    blueprint's body and no second pass is needed.
+    **Automations:** the raw config keeps `use_blueprint`, which is exactly why #226 had to walk
+    `async_validate_config_item`'s output as well.
+
+    Same attribute name, opposite behaviour, and nothing but an HA implementation detail stands
+    between us and #226's hole reappearing here. If a release stops expanding at this point, the
+    resolver would quietly walk a `use_blueprint` stub and find nothing — #226's bug, inside the fix
+    for #225. This test is what makes that a failure with a reason rather than a silent reopening.
+
+    The second half matters for a different rule: `raw_config` is pre-**validation**, so a templated
+    action name is still a `str` and AgDR-0042's refusal can see it. If HA ever validates earlier it
+    becomes a `Template` object and the walk goes blind to it — the same way it would have if #226
+    had replaced its raw pass instead of adding to it.
+    """
+    d = Path(core.config.path("blueprints/script/probe"))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "b.yaml").write_text(
+        "blueprint:\n  name: gate\n  domain: script\n  input:\n    pause:\n      name: pause\n"
+        "sequence:\n"
+        "  - action: lock.unlock\n"
+        "    target:\n"
+        "      entity_id: lock.gate\n"
+        "  - delay: !input pause\n"
+    )
+    (tmp_path / "scripts.yaml").write_text(
+        "via_bp:\n  alias: Via blueprint\n  use_blueprint:\n    path: probe/b.yaml\n    input:\n      pause: '00:00:05'\n"
+    )
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+
+    from homeassistant.components.script import DOMAIN as SCRIPT_DOMAIN
+
+    entity = core.data[SCRIPT_DOMAIN].get_entity("script.via_bp")
+    raw = entity.raw_config
+
+    # Expanded: the blueprint's body is here, the reference is not.
+    assert "use_blueprint" not in raw, raw
+    assert raw["sequence"][0]["action"] == "lock.unlock", raw
+    # Informational only — the walk does not need it, because the body is already present. It is a
+    # *property*, not a method: a `callable()` guard in the original probe silently took the other
+    # branch and printed the right value for the wrong reason, which this assertion caught.
+    assert entity.referenced_blueprint == "probe/b.yaml"
+
+    # Not validated: a duration is still the string as written, not a timedelta. The same is true
+    # of a templated action name, which is why the policy walk can still see one.
+    assert raw["sequence"][1]["delay"] == "00:00:05", raw["sequence"][1]
+
+    # And the resolver really does refuse it, which is the behaviour all of the above protects.
+    res = await build_dispatcher(core).dispatch(
+        "automations.validate",
+        {"config": {"alias": "x", "triggers": [{"trigger": "sun", "event": "sunset"}],
+                    "actions": [{"action": "script.turn_on", "target": {"entity_id": "script.via_bp"}}]}},
+    )
+    assert res["ok"] is False and res["status"] == "policy"
+    assert "lock.gate" in res["error"]
+
+
+async def test_the_script_resolver_answers_every_target_and_scopes_to_what_a_script_does(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    Three review findings on #225, two of which are one change.
+
+    **Drop nothing silently.** `_script_targets` used to keep only ids starting `script.`, so
+    `entity_id: all` — every script in the house — was never visited, and a non-script id was
+    skipped rather than refused, which falsified the claim that it failed closed. The sentinel is
+    case-insensitive (`comp_entity_ids` applies `Lower`), so `ALL` must go with `all`.
+
+    **A dict is not resolved.** `config.py` sets `raw_config = dict(config)` *before* validation and
+    `_minimal_config` keeps it for a FAILED_BLUEPRINT script, so a script whose `use_blueprint`
+    points at a missing blueprint has a good dict holding the *unexpanded* reference.
+    `isinstance(raw, dict)` therefore never fired and the resolver walked a stub — #226's bug inside
+    the fix for #225.
+
+    **Scope to what a script can do, not what it mentions** — and this is why the two are one
+    change. Dropping the reference scan removes the only thing that was catching a stub whose
+    *input* names a lock, so `use_blueprint`-means-unresolved has to land with it or that case goes
+    from refused to allowed.
+    """
+    bp = Path(core.config.path("blueprints/script/exists"))
+    bp.mkdir(parents=True, exist_ok=True)
+    (bp / "b.yaml").write_text(
+        "blueprint:\n  name: ok\n  domain: script\n  input:\n    lamp:\n      name: lamp\n"
+        "sequence:\n  - action: light.turn_on\n    target:\n      entity_id: !input lamp\n"
+    )
+    (tmp_path / "scripts.yaml").write_text(
+        "gate:\n  sequence:\n  - action: lock.unlock\n    target:\n      entity_id: lock.gate\n"
+        "evening:\n  sequence:\n  - action: light.turn_on\n    target:\n      entity_id: light.hall\n"
+        "reads_a_lock:\n  sequence:\n  - condition: state\n    entity_id: lock.front_door\n    state: locked\n"
+        "  - action: light.turn_on\n    target:\n      entity_id: light.hall\n"
+        "mentions_a_lock:\n  sequence:\n  - action: notify.persistent_notification\n    data:\n      message: check lock.front_door please\n"
+        "bp_ghost:\n  use_blueprint:\n    path: does_not_exist/ghost.yaml\n    input:\n      lamp: light.hall\n"
+        "bp_ok:\n  use_blueprint:\n    path: exists/b.yaml\n    input:\n      lamp: light.hall\n"
+    )
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+    d = build_dispatcher(core)
+
+    async def verdict(node: dict) -> dict:
+        return await d.dispatch("automations.validate", {"config": {
+            "alias": "x", "triggers": [{"trigger": "sun", "event": "sunset"}], "actions": [node]}})
+
+    # Finding 2 — every spelling of the sentinel, and a target that is not a script at all.
+    for node in (
+        {"action": "script.turn_on", "target": {"entity_id": "all"}},
+        {"action": "script.turn_on", "target": {"entity_id": "ALL"}},
+        {"action": "script.toggle", "target": {"entity_id": "all"}},
+        {"action": "script.turn_on", "data": {"entity_id": "all"}},
+        {"action": "script.turn_on", "target": {"entity_id": ["script.evening", "all"]}},
+        {"action": "script.turn_on", "target": {"entity_id": "input_boolean.test"}},
+    ):
+        assert (await verdict(node))["ok"] is False, node
+
+    # Finding 1 — a missing blueprint leaves an unexpanded stub that is still a dict.
+    assert (await verdict({"action": "script.turn_on", "target": {"entity_id": "script.bp_ghost"}}))["ok"] is False
+    # ...while a blueprint HA *could* load is expanded, so it resolves and is allowed.
+    assert (await verdict({"action": "script.turn_on", "target": {"entity_id": "script.bp_ok"}}))["ok"] is True
+
+    # Finding 3 — the over-refusal controls. A household script that *reads* a lock, or merely
+    # names one in free text, must stay callable; refusing it takes every automation with it.
+    for key in ("script.reads_a_lock", "script.mentions_a_lock"):
+        res = await verdict({"action": "script.turn_on", "target": {"entity_id": key}})
+        assert res["ok"] is True, (key, res)
+
+    # And the thing all of the above protects still refuses.
+    assert (await verdict({"action": "script.turn_on", "target": {"entity_id": "script.gate"}}))["ok"] is False
+    assert (await verdict({"action": "script.turn_on", "target": {"entity_id": "script.evening"}}))["ok"] is True
+
+
+async def test_a_blueprint_stub_whose_input_names_a_lock_is_refused_by_the_use_blueprint_rule_alone(
+    core: HomeAssistant, tmp_path: Path
+) -> None:
+    """
+    **The coupling between two changes, pinned so it cannot be simplified apart.**
+
+    Until #225's review this shape was refused by `find_reference_violations`, which the resolver
+    ran over the whole script config and which spotted `lock.gate` sitting in the stub's *input*.
+    That scan was removed deliberately — it refused any household script that merely **read** a
+    lock's state or named one in free text, which is the largest over-refusal this work produced.
+
+    Removing it left `use_blueprint` present means unresolved as the **only** guard on any blueprint
+    stub. So the removal and the replacement are one change, and this test exists to say so in the
+    place someone would break them: a future reader who sees `if "use_blueprint" in raw` and reads
+    it as belt-and-braces will simplify it away, because the scan that used to back it is long gone
+    and nothing else records that it was ever the other guard.
+
+    If this test fails, do not weaken it — the `use_blueprint` rule is load-bearing on its own.
+    """
+    (tmp_path / "scripts.yaml").write_text(
+        "bp_lock_input:\n"
+        "  use_blueprint:\n"
+        "    path: does_not_exist/ghost.yaml\n"
+        "    input:\n"
+        "      which: lock.gate\n"
+    )
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+
+    from custom_components.hearth_ai.handlers.scenes import find_nested_script_violations
+    from custom_components.hearth_ai.policy import find_reference_violations
+
+    cfg = {"alias": "x", "actions": [{"action": "script.turn_on", "target": {"entity_id": "script.bp_lock_input"}}]}
+
+    # The resolver refuses it, and the reference scan is no longer what does so.
+    assert await find_nested_script_violations(core, cfg) != []
+    res = await build_dispatcher(core).dispatch("automations.validate", {"config": dict(cfg, triggers=[{"trigger": "sun", "event": "sunset"}])})
+    assert res["ok"] is False and "blueprint" in res["error"], res
+
+    # Proof the old guard is genuinely gone: the scan sees nothing in the *automation* we wrote,
+    # because the lock is in the script's stub rather than in this config.
+    assert find_reference_violations(cfg, "config") == []

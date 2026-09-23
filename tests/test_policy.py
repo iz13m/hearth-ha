@@ -390,3 +390,76 @@ def test_every_action_key_home_assistant_knows_is_classified() -> None:
     assert {k for k, v in cv.ACTIONS_MAP.items() if v == "call_service"} == {"action", "service", "service_template"}
     assert {k for k, v in cv.ACTIONS_MAP.items() if v == "scene"} == {"scene"}
     assert {k for k, v in cv.ACTIONS_MAP.items() if v == "device"} == {"device_id"}
+
+
+def test_every_declared_value_shape_is_classified() -> None:
+    """
+    Companion to the `ACTIONS_MAP` key assertion, one level down (#228 review, by Security).
+
+    The key assertion answers *which keys exist*. This answers *which shapes each key declares* —
+    and that is the half that was missing when both of the last two holes shipped. `cv.SERVICE_SCHEMA`
+    states `data` as `Any(template, All(dict, template_complex))`: **two shapes behind one name**,
+    and the walk read one. `entity_id` is the same — `Any(All(Lower, Any("all","none")), entity_ids)`
+    — and the walk read the list and not the sentinel. Enumerating the keys was necessary and not
+    sufficient.
+
+    **What this does not do**, stated because a green assertion is otherwise read as "handled":
+    it checks that the *claim* covers the schema, not that the *code* honours the claim. A COVERAGE
+    entry saying `read` while the code ignores that shape passes here. The corpus is the half that
+    checks the code — both, or neither is enough.
+
+    Labels come from `_alt_labels`, not `repr`: a `vol.All(Lower, Any(...))` reprs with the `Lower`
+    function's **memory address**, which changes every run, so a table keyed on it could never
+    match. An unstable label cannot be checked against.
+    """
+    import homeassistant.helpers.config_validation as cv
+    import voluptuous as vol
+
+    def label(v: object) -> str:
+        if isinstance(v, (vol.Schema, dict)):
+            return "dict"
+        if isinstance(v, vol.All):
+            if any(s is dict for s in v.validators):
+                return "dict"
+            for s in v.validators:
+                if isinstance(s, vol.Any) and all(isinstance(x, str) for x in s.validators):
+                    return "sentinel(" + ",".join(sorted(s.validators)) + ")"
+            return "All(" + ",".join(getattr(s, "__name__", type(s).__name__) for s in v.validators) + ")"
+        return getattr(v, "__name__", type(v).__name__)
+
+    def alternatives(v: object) -> list[str]:
+        if isinstance(v, vol.Any):
+            return sorted({a for sub in v.validators for a in alternatives(sub)})
+        return [label(v)]
+
+    # `read` = a structural check inspects this shape. `inert:` = deliberately not read, with why.
+    coverage = {
+        "action": {"service": "read", "dynamic_template": "read"},  # AgDR-0042 refuses the template
+        "service_template": {"service": "read", "dynamic_template": "read"},
+        "data": {"dict": "read", "template": "read"},  # template -> `unknowable` in the carrier view
+        "data_template": {"dict": "read", "template": "read"},
+        "target": {"dict": "read", "dynamic_template": "read"},
+        # The sentinel is read by the **script resolver at the handler**, not by this walker — the
+        # hub cannot resolve scripts at all. Same split as the HANDLER_ONLY corpus group.
+        "entity_id": {"entity_ids": "read", "sentinel(all,none)": "read (handler: the script resolver)"},
+        "enabled": {
+            "boolean": "inert: never read, so a disabled action is still walked — stricter than HA",
+            "template": "inert: same. A loaded gun: add skip-disabled and this hides an action from "
+                        "the walk while HA runs it. Whoever adds it will read this table, not the thread.",
+        },
+        "alias": {"string": "inert: a label"},
+        "continue_on_error": {"boolean": "inert: control flow"},
+        "response_variable": {"str": "inert: captures a response, names nothing"},
+        "metadata": {"dict": "inert: the frontend's, never read by core"},
+        "note": {"str": "inert: a comment", "NoneType": "inert: a comment"},
+    }
+
+    declared = {str(getattr(k, "schema", k)): alternatives(v) for k, v in cv.SERVICE_SCHEMA.validators[1].schema.items()}
+    gaps = []
+    for key, alts in declared.items():
+        known = coverage.get(key)
+        if known is None:
+            gaps.append(f"key {key!r} is not classified at all (declares {alts})")
+            continue
+        gaps.extend(f"{key}: alternative {a!r} is in neither the read nor the declared-inert list" for a in alts if a not in known)
+    assert not gaps, "cv.SERVICE_SCHEMA declares a value shape nothing classifies:\n  " + "\n  ".join(gaps)

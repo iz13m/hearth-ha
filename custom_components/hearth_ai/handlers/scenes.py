@@ -9,6 +9,7 @@ import uuid
 import voluptuous as vol
 
 from homeassistant.components.scene import DOMAIN as SCENE_DOMAIN, PLATFORM_SCHEMA as SCENE_PLATFORM_SCHEMA
+from homeassistant.components.script import DOMAIN as SCRIPT_DOMAIN_
 from homeassistant.config import SCENE_CONFIG_PATH
 from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
@@ -131,7 +132,146 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
     Kept here because `automations.py` and `scripts.py` must ask exactly the same question — the
     pair of `_validate` functions drifting is the shape of bug this module already exists to stop.
     """
-    return find_policy_violations(config) + find_reference_violations(config, "config") + await find_nested_scene_violations(hass, config)
+    return (
+        find_policy_violations(config)
+        + find_reference_violations(config, "config")
+        + await find_nested_scene_violations(hass, config)
+        + await find_nested_script_violations(hass, config)
+    )
+
+
+# Starting a script is every `script.*` service except these two, plus the per-script service Home
+# Assistant registers for each script as `script.<its id>` — which is why this is keyed on the
+# domain rather than a list of service names (#220's `fansOut` derivation, same reasoning).
+_SCRIPT_NOT_STARTING = ("reload", "turn_off")
+
+
+def _script_raw_config(hass: HomeAssistant, entity_id: str) -> Any:
+    """The config Home Assistant holds for a loaded script, whatever file defined it.
+
+    **The running instance is the authority; a file is a partial view of it.** Reading
+    `scripts.yaml` would have refused every script an owner keeps in `packages/` or defines inline
+    in `configuration.yaml` — Hearth cannot read those files, but HA has already parsed them and
+    keeps each script's config on the entity. Verified on a running instance rather than assumed:
+    `raw_config` is populated identically for a `scripts.yaml` script and an inline one.
+
+    This is consistency with an existing design rather than a departure: `_members` above reads a
+    scene's membership off the entity for the same reason. The difference is that a scene's
+    attribute gives membership *only*, so that resolver needs `scenes.yaml` as well — `raw_config`
+    is the whole config, so this one needs nothing else.
+
+    `raw_config` is also **blueprint-expanded** — a `use_blueprint` script's config holds the
+    substituted sequence rather than the reference, so unlike #226's automation path there is no
+    second pass to do — while still being pre-*validation*, so a templated action name is still a
+    string here and AgDR-0042's refusal applies. Both halves in one, checked rather than assumed.
+
+    `referenced_blueprint` (a property, not a method) is **informational only** here — the body is already in `raw_config`,
+    so unlike #226's automation path there is nothing to expand and nothing to reach for it with.
+    That asymmetry between the two is pinned by
+    `test_a_script_raw_config_is_blueprint_expanded_but_not_validated`, because it rests on an HA
+    implementation detail and #226's hole would reappear here silently if it changed.
+
+    Returns `None` when HA has no such script, which is the only genuinely unresolvable case —
+    `UnavailableScriptEntity` carries no `raw_config` at all.
+    """
+    component = hass.data.get(SCRIPT_DOMAIN_)
+    entity = component.get_entity(entity_id) if component is not None else None
+    return getattr(entity, "raw_config", None) if entity is not None else None
+
+
+def _script_targets(config: Any, path: str) -> list[tuple[str, str]]:
+    """Every script a config starts, as (entity_id, path) pairs."""
+    out: list[tuple[str, str]] = []
+    for node in _nodes(config):
+        action = _fold(str(_service_name(node) or ""))
+        if not action.startswith(f"{SCRIPT_DOMAIN_}."):
+            continue
+        service = action.split(".", 1)[1]
+        if service in _SCRIPT_NOT_STARTING:
+            continue
+        if service in ("turn_on", "toggle"):
+            ids = [i for k in TARGET_BEARING_KEYS for i in _entity_ids(node.get(k))] + _entity_ids(node)
+        else:
+            # `script.my_script` — the per-script service names the script itself.
+            ids = [action]
+        for eid in ids:
+            # **Drop nothing silently.** An id in a `script.*` target is either a script, one of
+            # HA's two sentinels, or a mistake — and all three want an answer. Skipping the ones
+            # that did not start with `script.` is what let `entity_id: all` through: it reached
+            # every script in the house, including one that unlocks a door, while the scene
+            # resolver refuses exactly that thirty lines below.
+            #
+            # `comp_entity_ids` is `Any(All(Lower, Any("all", "none")), entity_ids)`, so the
+            # sentinel is **case-insensitive** — `ALL` folds to `all`, which is why this compares
+            # the folded form rather than the literal.
+            out.append((_fold(eid), path))
+    return out
+
+
+async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> list[str]:
+    """
+    Why a script or automation may not be written: it starts a script that reaches a denied domain.
+
+    A script is **not** checked when it runs (AgDR-0005), so `script.turn_on` at a script whose body
+    unlocks a door was the last container without a mechanism — the same shape as `scene.turn_on`
+    before #126, one name removed.
+
+    **Fail closed**, and this is the load-bearing rule: a script Home Assistant does not have is
+    refused rather than allowed. That is the opposite of `script_run_violations`, deliberately, and
+    AgDR-0044's sentence about unreadable scripts is *scoped to run time* rather than overturned by
+    this. The questions differ: at run time the script already exists, is exposed, and `routines.run`
+    gates it, so refusing breaks a household's own scripts and grants nothing. At authoring time a
+    model is acquiring an **unattended** capability — a `time_pattern` trigger starting a script
+    nobody can inspect, with no human and no exposure gate in the loop — which is exactly what
+    AgDR-0005 concedes it cannot check.
+
+    Because `_script_raw_config` reads the running instance rather than `scripts.yaml`, "cannot
+    read" now means Home Assistant itself has no such script, not "not in the file we happened to
+    read" — so a household keeping scripts in `packages/` is unaffected.
+    """
+    problems: list[str] = []
+    checked: set[str] = set()
+
+    async def visit(entity_id: str, path: str) -> None:
+        if entity_id in checked:  # a script that starts itself, or a diamond
+            return
+        checked.add(entity_id)
+        if entity_id in ("all", "none"):
+            problems.append(f"{path}: starting a script by '{entity_id}' names every script in the house rather than one")
+            return
+        if not entity_id.startswith(f"{SCRIPT_DOMAIN_}."):
+            problems.append(f"{path}: {entity_id} is not a script, so what starting it would do cannot be checked")
+            return
+        raw = _script_raw_config(hass, entity_id)
+        if not isinstance(raw, dict):
+            problems.append(f"{path}: {entity_id} is a script Home Assistant does not have, so what it would do cannot be checked")
+            return
+        # `isinstance(raw, dict)` is **not** the fail-closed condition. `config.py` sets
+        # `raw_config = dict(config)` *before* validation and `_minimal_config` keeps it for a
+        # FAILED_BLUEPRINT script, so a script whose `use_blueprint` points at a **missing**
+        # blueprint has a perfectly good dict holding the *unexpanded* reference. Walking that
+        # finds nothing — #226's bug, inside the fix for #225. The script is `unavailable` and
+        # cannot run now, so this is a TOCTOU rather than an immediate capability: the owner
+        # restores the blueprint later and the automation is already written.
+        if "use_blueprint" in raw:
+            problems.append(f"{path}: {entity_id} is built from a blueprint Home Assistant could not load, so what it would do cannot be checked")
+            return
+        where = f"{path}->{entity_id}"
+        # **What a script can do, not what it mentions.** Deliberately *without*
+        # `find_reference_violations`, which the scene precedent also omits — `scene_run_violations`
+        # checks membership domains only. Running it here refused an ordinary household script for
+        # a `condition: state` on `lock.front_door`, or for the words "check lock.front_door" in a
+        # notification, and took every Hearth automation that calls that script with it. Reading
+        # whether a lock is locked is not reaching a lock: `HIDDEN_DOMAINS` already stops the model
+        # learning the state, and the household wrote the condition themselves.
+        problems.extend(find_policy_violations(raw, where))
+        problems.extend(await find_nested_scene_violations(hass, raw))
+        for nested, _ in _script_targets(raw, where):
+            await visit(nested, where)
+
+    for entity_id, path in _script_targets(config, "config"):
+        await visit(entity_id, path)
+    return list(dict.fromkeys(problems))
 
 
 async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list[str]:
