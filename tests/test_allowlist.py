@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from custom_components.hearth_ai.handlers.flows import DENIED_DOMAINS
 from custom_components.hearth_ai.handlers.registry import ATTRIBUTE_DENYLIST
 from custom_components.hearth_ai.const import (
     CAPABILITIES,
@@ -35,6 +36,17 @@ def test_error_codes_match_shared() -> None:
 def test_attribute_denylist_matches_shared() -> None:
     data = _load()
     assert set(data["attribute_denylist"]) == ATTRIBUTE_DENYLIST
+
+
+def test_setup_denials_match_shared() -> None:
+    """The hub refuses the same setups the box does (#467), so a hub deploy covers every box.
+
+    Compared as sets in both directions: an entry only the box has protects no home that has not
+    updated, and an entry only the hub has is one a home talking to an older hub was never told about.
+    """
+    data = _load()
+    assert set(data["denied_setup_domains"]) == DENIED_DOMAINS
+    assert len(data["denied_setup_domains"]) == len(DENIED_DOMAINS)
 
 
 def test_control_is_limited_to_opt_in_methods() -> None:
