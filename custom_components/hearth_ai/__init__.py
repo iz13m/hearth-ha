@@ -9,6 +9,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.start import async_at_started
 
 from .client import HearthClient
 from .const import CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN, INTEGRATION_VERSION
@@ -71,6 +72,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bo
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     if options.connection_enabled:
         client.start()
+    # The other half of `ha.started` (#235): the client sends it after `hello` if HA is already
+    # running, and this sends it once HA gets there. On an options reload HA is already running, so
+    # this fires at once, before any socket exists, and the client's own gate makes it a no-op.
+    entry.async_on_unload(async_at_started(hass, client.async_ha_started))
     return True
 
 

@@ -19,7 +19,7 @@ import uuid
 import aiohttp
 
 from homeassistant.const import __version__ as HA_VERSION
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -183,12 +183,18 @@ class HearthClient:
             )
             self.installation_id = result.get("installation_id")
             self.last_error = None
+            # Read with no await between it and `_set_connected(True)`. `async_at_started`'s callback
+            # either ran before this line, saw `connected` false and left the send to us, or runs after
+            # it and sees `connected` true. There is no moment in which both of them decline.
+            started = self._hass.state is CoreState.running
             self._set_connected(True)
             # After hello, never before: the hub rejects anything else until the handshake is done.
             if self._subscriber is not None:
                 self._subscriber.start()
             self._watcher.start()
             _LOGGER.info("connected to Hearth hub as installation %s", self.installation_id)
+            if started:
+                await self.async_ha_started()
         except RpcError as err:
             self.last_error = f"hello failed: {err.message}"
             _LOGGER.warning("hello failed: %s", err.message)
@@ -278,6 +284,26 @@ class HearthClient:
         if ws is None or ws.closed:
             return
         await self.async_call("registry.changed", {}, timeout=PUSH_TIMEOUT_S)
+
+    async def async_ha_started(self, _hass: HomeAssistant | None = None) -> None:
+        """Tell the hub Home Assistant has finished starting (#235).
+
+        Until it has, an entity whose integration is still setting up has no state, so `entities.list`
+        answers short, and the hub builds no voice projection from a box that has not said this.
+        Called after `hello` when HA is already running, and as the `async_at_started` callback when
+        it is not. Gated on `hello` having completed, not on the socket being open: before `hello` the
+        hub answers `unauthorized`.
+
+        Best effort, with its own `except`: nothing else catches for it. Inside `_hello` an `RpcError`
+        would reach the handler that closes the socket, and an older hub answers `method_not_allowed`.
+        That hub builds no projection from it either way, so the refusal costs nothing.
+        """
+        if not self.connected:
+            return
+        try:
+            await self.async_call("ha.started", {}, timeout=PUSH_TIMEOUT_S)
+        except RpcError as err:
+            _LOGGER.debug("hub did not take ha.started: %s", err)
 
     def _resolve(self, frame: dict[str, Any]) -> None:
         fut = self._pending.get(str(frame.get("id", "")))
