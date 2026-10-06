@@ -146,11 +146,11 @@ async def panel_expose(hass: HomeAssistant, connection: websocket_api.ActiveConn
     changed: list[str] = []
     refused: list[dict[str, str]] = []
     for entity_id in msg["entity_ids"][:100]:
-        reason = apply_exposure(hass, entity_id, msg["expose"], ent_reg)
-        if reason is None:
+        refusal = apply_exposure(hass, entity_id, msg["expose"], ent_reg)
+        if refusal is None:
             changed.append(entity_id)
         else:
-            refused.append({"entity_id": entity_id, "reason": reason})
+            refused.append({"entity_id": entity_id, **refusal})
     if changed:
         _publish(hass)
     connection.send_result(msg["id"], {"changed": changed, "refused": refused})

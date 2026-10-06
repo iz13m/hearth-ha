@@ -46,6 +46,11 @@ DEFAULT_LIMIT = 500
 # The hub validates this too; repeated here because both sides enforce, always (invariant 1).
 ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 
+# Why a change was refused, as a closed word the app renders in the household's language (#452).
+# `reason` stays beside it in English for the Hearth panel and for apps older than the code. Must
+# equal `EXPOSURE_REFUSAL_CODES` in packages/shared; tests/test_exposure.py holds the two together.
+REFUSAL_CODES = ("not_entity", "off_limits", "no_such_device", "disabled", "hidden", "failed")
+
 
 def _int_param(params: dict[str, Any], key: str, default: int, lo: int, hi: int) -> int:
     value = params.get(key, default)
@@ -68,8 +73,11 @@ def _shareable(entity_id: str) -> bool:
     return entity_id.split(".", 1)[0] not in OFF_LIMITS
 
 
-def _refusal(hass: HomeAssistant, entity_id: str, ent_reg: er.EntityRegistry, *, expose: bool) -> str | None:
+def _refusal(hass: HomeAssistant, entity_id: str, ent_reg: er.EntityRegistry, *, expose: bool) -> dict[str, str] | None:
     """Why this entity may not be changed, or None when it may.
+
+    The answer is a `code` from `REFUSAL_CODES` and an English `reason`, plus the `domain` for
+    `off_limits` so the app can name what kind of device it was.
 
     Tolerates an entity with no registry entry, because the read path does: a template or MQTT light
     declared in YAML without a `unique_id` has a state and no entry, and Home Assistant exposes it by
@@ -77,22 +85,22 @@ def _refusal(hass: HomeAssistant, entity_id: str, ent_reg: er.EntityRegistry, *,
     ones this screen could neither list nor take back.
     """
     if not ENTITY_ID_RE.match(entity_id):
-        return "not an entity id"
+        return {"code": "not_entity", "reason": "not an entity id"}
     domain = entity_id.split(".", 1)[0]
     if expose and domain in OFF_LIMITS:
         # Not "you lack permission": Hearth can never operate these, so sharing one would only
         # promise something the action policy refuses later.
-        return f"Hearth never works with {domain} entities"
+        return {"code": "off_limits", "reason": f"Hearth never works with {domain} entities", "domain": domain}
     ent = ent_reg.async_get(entity_id)
     # A registry lookup also resolves an entry *id*; make sure we got the entity we asked about.
     if ent is not None and ent.entity_id != entity_id:
-        return "no such device"
+        return {"code": "no_such_device", "reason": "no such device"}
     if ent is None and hass.states.get(entity_id) is None:
-        return "no such device"
+        return {"code": "no_such_device", "reason": "no such device"}
     if ent is not None and ent.disabled_by:
-        return "disabled in Home Assistant"
+        return {"code": "disabled", "reason": "disabled in Home Assistant"}
     if ent is not None and ent.hidden_by:
-        return "hidden in Home Assistant"
+        return {"code": "hidden", "reason": "hidden in Home Assistant"}
     return None
 
 
@@ -185,27 +193,27 @@ async def entities_expose(hass: HomeAssistant, params: dict[str, Any]) -> dict[s
     for entity_id in ids:
         if not isinstance(entity_id, str):
             raise RpcError("invalid_params", "entity_ids must be strings")
-        reason = apply_exposure(hass, entity_id, expose, ent_reg)
-        if reason is not None:
-            refused.append({"entity_id": entity_id, "reason": reason})
+        refusal = apply_exposure(hass, entity_id, expose, ent_reg)
+        if refusal is not None:
+            refused.append({"entity_id": entity_id, **refusal})
             continue
         changed.append(entity_id)
     return {"changed": changed, "refused": refused}
 
 
-def apply_exposure(hass: HomeAssistant, entity_id: str, expose: bool, ent_reg: er.EntityRegistry) -> str | None:
-    """Share one entity with Assist, or stop. Returns why it was refused, or None on success.
+def apply_exposure(hass: HomeAssistant, entity_id: str, expose: bool, ent_reg: er.EntityRegistry) -> dict[str, str] | None:
+    """Share one entity with Assist, or stop. Returns why it was refused (see `_refusal`), or None.
 
     The Hearth panel and the hub's `entities.expose` both go through here, so the two can never come
     to different answers about what is off limits — which is the one rule in this file that matters.
     """
-    reason = _refusal(hass, entity_id, ent_reg, expose=expose)
-    if reason is not None:
-        return reason
+    refusal = _refusal(hass, entity_id, ent_reg, expose=expose)
+    if refusal is not None:
+        return refusal
     try:
         async_expose_entity(hass, ASSISTANT, entity_id, expose)
     except Exception as err:  # noqa: BLE001 - one bad entity must not lose the rest
-        return str(err) or "could not be changed"
+        return {"code": "failed", "reason": str(err) or "could not be changed"}
     return None
 
 

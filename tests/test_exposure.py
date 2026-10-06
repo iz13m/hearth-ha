@@ -6,13 +6,21 @@ refuses to say and what `entities.expose` refuses to do.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity, async_should_expose
 from homeassistant.core import HomeAssistant
 from homeassistant.const import EntityCategory
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.hearth_ai.handlers import exposure
+from custom_components.hearth_ai.handlers.exposure import REFUSAL_CODES
 from custom_components.hearth_ai.rpc import build_dispatcher
+
+SCHEMA = Path(__file__).resolve().parents[2] / "shared" / "schema" / "methods.json"
 
 
 def _register(core: HomeAssistant, domain: str, object_id: str, **kwargs) -> str:
@@ -132,7 +140,7 @@ async def test_refuses_a_malformed_entity_id(core: HomeAssistant) -> None:
     ent = er.async_get(core).async_get_or_create("lock", "test", "lock-front", suggested_object_id="front")
     out = await build_dispatcher(core).dispatch("entities.expose", {"entity_ids": [ent.id, "NotAnId"], "expose": True})
     assert out["changed"] == []
-    assert {r["reason"] for r in out["refused"]} == {"not an entity id"}
+    assert {(r["code"], r["reason"]) for r in out["refused"]} == {("not_entity", "not an entity id")}
     assert async_should_expose(core, "conversation", "lock.front") is False
 
 
@@ -140,7 +148,10 @@ async def test_refuses_to_share_a_domain_hearth_cannot_work_with(core: HomeAssis
     lock = _register(core, "lock", "front")
     out = await build_dispatcher(core).dispatch("entities.expose", {"entity_ids": [lock], "expose": True})
     assert out["changed"] == []
-    assert out["refused"][0]["entity_id"] == lock
+    # The domain travels with the code so the app can say what kind of device it was (#452).
+    assert out["refused"] == [
+        {"entity_id": lock, "code": "off_limits", "reason": "Hearth never works with lock entities", "domain": "lock"}
+    ]
     # And the refusal did not quietly happen anyway.
     assert async_should_expose(core, "conversation", lock) is False
 
@@ -170,13 +181,80 @@ async def test_one_bad_id_does_not_lose_the_rest(core: HomeAssistant) -> None:
     assert async_should_expose(core, "conversation", good) is True
 
 
+async def test_refuses_a_device_that_is_not_there(core: HomeAssistant) -> None:
+    out = await build_dispatcher(core).dispatch("entities.expose", {"entity_ids": ["light.does_not_exist"], "expose": True})
+    assert out["refused"] == [{"entity_id": "light.does_not_exist", "code": "no_such_device", "reason": "no such device"}]
+    # Only `off_limits` names a domain: every other code is about the device, not its kind.
+    assert "domain" not in out["refused"][0]
+
+
+@pytest.mark.parametrize(("message", "reason"), [("store is read-only", "store is read-only"), ("", "could not be changed")])
+async def test_a_change_home_assistant_rejects_is_failed(
+    core: HomeAssistant, monkeypatch: pytest.MonkeyPatch, message: str, reason: str
+) -> None:
+    """The one refusal `_refusal` cannot predict: Home Assistant itself raising on the write.
+
+    `reason` is whatever Home Assistant said, which is exactly why the app renders the code instead.
+    """
+    good = _register(core, "light", "hallway")
+    broken = _register(core, "light", "porch")
+    real = exposure.async_expose_entity
+
+    def expose(hass: HomeAssistant, assistant: str, entity_id: str, should_expose: bool) -> None:
+        if entity_id == broken:
+            raise RuntimeError(message)
+        real(hass, assistant, entity_id, should_expose)
+
+    monkeypatch.setattr(exposure, "async_expose_entity", expose)
+    out = await build_dispatcher(core).dispatch("entities.expose", {"entity_ids": [good, broken], "expose": False})
+    assert out["changed"] == [good]
+    assert out["refused"] == [{"entity_id": broken, "code": "failed", "reason": reason}]
+
+
+def test_refusal_codes_match_shared() -> None:
+    """The box's declared codes must equal the hub's enum (packages/shared `EXPOSURE_REFUSAL_CODES`).
+
+    A code only the box knows reaches the app as no code at all — the hub's schema drops it to the
+    generic line — so drift fails quietly in production and has to fail loudly here. This pins the
+    declared list; the next test pins what the handler actually sends against it.
+    """
+    assert SCHEMA.is_file(), "run `pnpm --filter @hearth/shared export:jsonschema` first"
+    refused = json.loads(SCHEMA.read_text())["methods"]["entities.expose"]["result"]["properties"]["refused"]
+    assert refused["items"]["properties"]["code"]["enum"] == list(REFUSAL_CODES)
+
+
+async def test_every_refusal_sends_a_declared_code(core: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One of each refusal in one request: the codes sent are exactly `REFUSAL_CODES`.
+
+    The codes are literals at each `return`, so renaming one there (and in its own test) would leave
+    the declared list — and the mirror test above — still passing while the hub dropped the code.
+    """
+    broken = _register(core, "light", "porch")
+    ids = [
+        "NotAnId",
+        _register(core, "lock", "front"),
+        "light.does_not_exist",
+        _register(core, "light", "spare", disabled_by=er.RegistryEntryDisabler.USER),
+        _register(core, "light", "tucked", hidden_by=er.RegistryEntryHider.USER),
+        broken,
+    ]
+
+    def expose(hass: HomeAssistant, assistant: str, entity_id: str, should_expose: bool) -> None:
+        raise RuntimeError("store is read-only")
+
+    monkeypatch.setattr(exposure, "async_expose_entity", expose)
+    out = await build_dispatcher(core).dispatch("entities.expose", {"entity_ids": ids, "expose": True})
+    assert out["changed"] == []
+    assert [r["code"] for r in out["refused"]] == list(REFUSAL_CODES)
+
+
 async def test_refuses_a_disabled_or_hidden_entity(core: HomeAssistant) -> None:
     disabled = _register(core, "light", "spare", disabled_by=er.RegistryEntryDisabler.USER)
     hidden = _register(core, "light", "tucked", hidden_by=er.RegistryEntryHider.USER)
     d = build_dispatcher(core)
     out = await d.dispatch("entities.expose", {"entity_ids": [disabled, hidden], "expose": True})
     assert out["changed"] == []
-    assert {r["entity_id"] for r in out["refused"]} == {disabled, hidden}
+    assert {r["entity_id"]: r["code"] for r in out["refused"]} == {disabled: "disabled", hidden: "hidden"}
     # And they are not offered in the first place.
     rows = await d.dispatch("entities.exposable", {})
     assert {disabled, hidden} & {r["entity_id"] for r in rows} == set()

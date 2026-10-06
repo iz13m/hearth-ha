@@ -132,7 +132,9 @@ async def test_sharing_goes_through_the_same_gate_the_hub_uses(panel: HomeAssist
     msg = await _send(client, {"type": "hearth_ai/panel/expose", "entity_ids": ["switch.lamp", "lock.front"], "expose": True})
     assert msg["success"]
     assert msg["result"]["changed"] == ["switch.lamp"]
-    assert [r["entity_id"] for r in msg["result"]["refused"]] == ["lock.front"]
+    assert [(r["entity_id"], r["code"]) for r in msg["result"]["refused"]] == [("lock.front", "off_limits")]
+    # The panel draws `reason`, so it has to survive the code being added beside it.
+    assert msg["result"]["refused"][0]["reason"] == "Hearth never works with lock entities"
     assert async_should_expose(panel, "conversation", "switch.lamp") is True
 
 
