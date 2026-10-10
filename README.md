@@ -22,5 +22,18 @@ The integration opens an **outbound** WebSocket to Hearth; no ports, no Nabu Cas
 ## Managed AI
 If you subscribe to the Managed tier, a **Hearth AI** conversation agent appears under Settings → Voice assistants. Select it as the agent for an assistant and chat in the HA app or by voice.
 
+## Bumping the Home Assistant pin
+
+The pin lives in three lines, and a bump moves all of them: `pyproject.toml` (`pytest-homeassistant-custom-component==`, line 12) and `scripts/test.sh` (`PHCC_VERSION`, line 16, and `HA_VERSION`, line 17). Delete `.venv` afterwards so `scripts/test.sh` rebuilds it, then:
+
+1. Run `scripts/test.sh -q` as usual.
+2. **Re-run the setup-axis scan**: `.venv/bin/python scripts/setup_axis_path_fields.py`. It lists the config flows that are new, gone or changed against `scripts/setup_axis_baseline.json`, and exits 1 if there is any difference. The scan stays out of `pytest` because its output is not fit to drive a denial (`tests/test_policy.py` explains).
+3. **Read every flow it reports as new or changed** (`config_flow.py` and what it imports) before merging the bump. The question is whether the field takes a host path whose content can come back out, as `local_file` and `upb` did; the mechanisms already established are in the baseline's `read` map. A new integration with a raw host-path field would otherwise arrive with every test green.
+4. Record what you found in the baseline's `read` map, then run `--write-baseline`. Do that last: running it first turns the baseline into a copy of the new version.
+
+Each baseline row records every match with its count and how many times the flow calls `is_allowed_path`, so a flow that already matched and gains a second path field is reported, not only a new flow. A test fails while the baseline's version stamp differs from the installed Home Assistant, which only says the bump has not been through this step; it does not run the scan.
+
+The scan reads only each `config_flow.py`, so a clean result means "no new match there", not "no new path fields".
+
 ## Licence
 Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 Cade Wan SA.

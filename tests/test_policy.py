@@ -492,8 +492,9 @@ def test_every_path_writing_service_is_classified() -> None:
     `REFUSED_AT_SETUP` below is only the part of it this scan can also surface (`downloader`,
     `hassio`) — `local_file` and `upb` are enforced and deliberately absent from it, per assertion 7.
 
-    A scan of the setup axis exists at `RESEARCH/HEARTH_SETUP_AXIS_SCAN/`, deliberately outside the
-    suite, because **it is not fit to drive a denial**:
+    A scan of the setup axis exists at `scripts/setup_axis_path_fields.py` (#514), deliberately
+    outside the suite, because **it is not fit to drive a denial**. It is re-run, and its output diffed
+    against `scripts/setup_axis_baseline.json`, at every Home Assistant pin bump (README):
 
         TIGHT (explicit file-path fields):  13 flows,  2 gated, 11 ungated
         LOOSE (+ any _PATH, key_file):      40 flows,  3 gated, 37 ungated
@@ -512,6 +513,10 @@ def test_every_path_writing_service_is_classified() -> None:
         the path nor the content is caller-chosen, and nothing is read back out.
       * **not a host path at all** — `transmission`, `octoprint` and `zwave_js` paths are URL routes;
         `zha` and `bryant_evolution` are serial devices.
+      * **both a URL and an upload** — `influxdb`: the tight pattern matches `file_path`, the temporary
+        file `process_uploaded_file` hands back for the CA certificate (the caller supplies bytes, as
+        in the first bucket), and the loose one matches `CONF_PATH`, which is `url.path`, a URL route.
+        Neither is a host path. Until now this classification lived only in a #256 comment.
 
     **`upb` was the one other raw host-path read, and it is now denied at setup too.** It was first
     left open on the bound "the content must parse as a UPB export, so a parse oracle rather than
