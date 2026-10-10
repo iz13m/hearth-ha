@@ -95,7 +95,7 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
     if len(raw_ids) > 50:
         raise RpcError("invalid_params", "at most 50 entities per call")
 
-    if violations := find_service_call_violations(domain, service, raw_ids):
+    if violations := find_service_call_violations(domain, service, raw_ids, params.get("data")):
         raise RpcError("method_not_allowed", "; ".join(violations))
 
     if not hass.services.has_service(domain, service):

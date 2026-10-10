@@ -15,7 +15,7 @@ from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from ..policy import TARGET_BEARING_KEYS, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations
+from ..policy import TARGET_BEARING_KEYS, VALVE_DOMAIN, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import _exposed
@@ -81,11 +81,21 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
     locks are refused everywhere. Both sources are checked because neither is complete: the config
     is authoritative but only exists for scenes in scenes.yaml, and the attribute covers the rest.
     """
+    members = _members(hass, entity_id)
     problems = [
         f"{eid}: scenes that set {eid.split('.', 1)[0]} entities cannot be activated"
-        for eid in _members(hass, entity_id)
+        for eid in members
         if eid.split(".", 1)[0] in DENIED_ENTITY_DOMAINS
     ]
+    # A scene may close a valve and never open one (#527). The membership attribute names the valve
+    # but not the state it is set to, so without scenes.yaml there is no way to tell which way it
+    # moves, and that is refused rather than assumed.
+    if not config:
+        problems += [
+            f"{eid}: this scene sets a valve and Hearth cannot read which way, so it cannot be activated"
+            for eid in members
+            if eid.split(".", 1)[0].lower() == VALVE_DOMAIN
+        ]
     if config:
         problems += find_scene_policy_violations(config)
     return list(dict.fromkeys(problems))

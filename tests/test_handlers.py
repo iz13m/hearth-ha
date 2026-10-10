@@ -275,6 +275,34 @@ async def test_refuses_a_script_that_turns_on_a_scene_setting_a_lock(core: HomeA
     assert (await d.dispatch("scripts.validate", {"key": "film_time", "config": fine}))["ok"] is True
 
 
+async def test_a_scene_that_sets_a_valve_runs_only_when_it_can_be_read_to_close_it(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    A scene may close a valve and never open one (#527). Box-only: what a scene holds is not
+    knowable on the hub.
+
+    A scene outside scenes.yaml reports its members and not their states, so a valve in one is
+    refused, as is a script that would activate it. Nothing is said about which way the valve goes
+    because nothing here can read it. A yaml scene that only closes runs.
+    """
+    from custom_components.hearth_ai.handlers.scenes import find_scene_run_violations
+
+    core.states.async_set("scene.water_on", "unknown", {"friendly_name": "Water on", "entity_id": ["valve.main"]})
+    d = build_dispatcher(core)
+    assert find_scene_run_violations(core, "scene.water_on", None) == [
+        "valve.main: this scene sets a valve and Hearth cannot read which way, so it cannot be activated"
+    ]
+    nested = {"alias": "Water", "sequence": [{"action": "scene.turn_on", "target": {"entity_id": "scene.water_on"}}]}
+    res = await d.dispatch("scripts.validate", {"key": "water", "config": nested})
+    assert res["ok"] is False and res["status"] == "policy"
+    assert "valve.main" in res["error"]
+
+    # With its scenes.yaml entry the state is readable: closing runs, opening does not.
+    closes = {"id": "1", "name": "Water off", "entities": {"valve.main": "closed"}}
+    opens = {"id": "2", "name": "Water on", "entities": {"valve.main": {"state": "open"}}}
+    assert find_scene_run_violations(core, "scene.water_on", closes) == []
+    assert find_scene_run_violations(core, "scene.water_on", opens) == ["entities.valve.main: a scene may only close a valve"]
+
+
 async def test_labels_a_routine_as_a_hearth_scene_and_reports_it(core: HomeAssistant, tmp_path: Path) -> None:
     """
     A scene with steps is stored as a **labelled script** (AgDR-0044), so saving one has to put the

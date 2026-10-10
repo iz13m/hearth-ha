@@ -27,6 +27,11 @@ DENIED_ACTION_DOMAINS: frozenset[str] = frozenset(
         "onboarding",
         "auth",
         "cloud",
+        # A siren is the alarm panel's output: silencing one during an intrusion or a fire is the
+        # audible half of a disarm, and sounding one can call out a monitoring service. Refused like
+        # `alarm_control_panel`, ruled by the owner (#527). Some "sirens" are chimes; refusing them
+        # too is the side to err on.
+        "siren",
     }
 )
 DENIED_ACTIONS: frozenset[str] = frozenset(
@@ -80,15 +85,88 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "automation.toggle",
     }
 )
-DENIED_ENTITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera", "device_tracker", "person"})
+DENIED_ENTITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera", "device_tracker", "person", "siren"})
+
+# Valves move one way only from Hearth: closed (#527). Mirror of the valve rule in policy.ts, whose
+# comment says why it is a rule about direction rather than a domain entry: closing must stay one
+# tap, and `DENIED_ENTITY_DOMAINS` would hide every valve from the model and stop it closing one.
+# `stop_valve` is left out: it cannot open a valve, but an automation triggered on `to: closing` that
+# stops it leaves every later close halfway, the household's leak response included.
+# An allowlist, so a valve service Home Assistant adds later starts refused. Scene states and device
+# actions do nothing on the pinned 2026.9.3 (`valve` has no `reproduce_state` or `device_action`
+# platform) and are refused anyway, for the version that adds them.
+VALVE_DOMAIN = "valve"
+_VALVE_CLOSING_SERVICES = ("close_valve",)
+_VALVE_POSITION_SERVICE = "set_valve_position"
+_VALVE_CLOSING_RULE = "Hearth only closes a valve (close_valve, or set_valve_position to a literal 0)"
+
+
+def _is_literal_zero(value: Any) -> bool:
+    """A number that is exactly zero. Not `"0"`, not `False` (which Python also calls 0)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+
+
+def _valve_service_closes(action: str, positions: list[Any] | None) -> bool:
+    """Whether a call to `action` can only close a valve. Mirror of valveServiceCloses in policy.ts."""
+    service = _fold(action)[len(VALVE_DOMAIN) + 1 :]
+    if service in _VALVE_CLOSING_SERVICES:
+        return True
+    return service == _VALVE_POSITION_SERVICE and positions is not None and len(positions) > 0 and all(_is_literal_zero(p) for p in positions)
+
+
+def _valve_state_closes(value: Any) -> bool:
+    """A scene's stored valve state that can only leave it closed. Mirror of valveStateCloses."""
+    if value == "closed" and isinstance(value, str):
+        return True
+    if not isinstance(value, dict):
+        return False
+    return value.get("state") == "closed" and all(k == "current_position" and _is_literal_zero(v) for k, v in value.items() if k != "state")
+
+
+def _scene_valve_ids(node: dict[str, Any]) -> list[str]:
+    """Every valve a scene service sets to something other than closed, or snapshots. Mirror of sceneValveIds."""
+    out: list[str] = []
+
+    def flat(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else [value]
+
+    for src in (node, node.get("data"), node.get("data_template")):
+        if not isinstance(src, dict):
+            continue
+        entities = src.get("entities")
+        if isinstance(entities, dict):
+            out.extend(str(k) for k, v in entities.items() if _domain(str(k)) == VALVE_DOMAIN and not _valve_state_closes(v))
+        else:
+            out.extend(x for x in flat(entities) if _domain(x) == VALVE_DOMAIN)
+        # Comma-split like a target's `entity_id`: `cv.entity_ids` splits `"light.a, valve.main"`.
+        out.extend(x for x in _entity_ids({"entity_id": src.get("snapshot_entities")}) if _domain(x) == VALVE_DOMAIN)
+    return out
+
+
+def _positions_of(node: dict[str, Any]) -> list[Any] | None:
+    """The `position` values a written service call carries, or None when a carrier is a template."""
+    out: list[Any] = []
+    for key in ("data", "data_template"):
+        value = node.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            return None
+        if "position" in value:
+            out.append(value["position"])
+    return out
 
 # Domains handled by their own capability, so device control never implicitly grants the
 # ability to run user-authored sequences.
 ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
 
 
-def find_service_call_violations(domain: str, service: str, entity_ids: list[str]) -> list[str]:
-    """Mirror of findServiceCallViolations in packages/shared/src/policy.ts."""
+def find_service_call_violations(domain: str, service: str, entity_ids: list[str], data: Any = None) -> list[str]:
+    """Mirror of findServiceCallViolations in packages/shared/src/policy.ts.
+
+    `data` is read only for a valve's position (#527). Leaving it out refuses `set_valve_position`,
+    so a caller that does not pass it fails closed rather than open.
+    """
     import re  # noqa: PLC0415
 
     problems: list[str] = []
@@ -109,6 +187,10 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
         problems.append(f"{full}: not allowed")
     if domain in ROUTINE_DOMAINS:
         problems.append(f"{full}: use activate_scene or run_script instead of calling the {raw_domain} domain directly")
+    # Keyed on the service, not the ids: `valve.open_valve` reaches valves whatever it names (#527).
+    positions = [data["position"]] if isinstance(data, dict) and "position" in data else []
+    if domain == VALVE_DOMAIN and not _valve_service_closes(full, positions):
+        problems.append(f"{full}: {_VALVE_CLOSING_RULE}")
     if not entity_ids:
         problems.append(f"{full}: at least one entity_id is required (broad targets are not allowed)")
     for eid in entity_ids:
@@ -119,6 +201,9 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
             problems.append(f"{eid}: entities in {d} can never be controlled")
         elif d in ROUTINE_DOMAINS:
             problems.append(f"{eid}: use activate_scene or run_script for {d} entities")
+        # `homeassistant.toggle` forwards to `valve.toggle`; no other domain's service may move a valve.
+        elif d == VALVE_DOMAIN and domain != VALVE_DOMAIN:
+            problems.append(f"{eid}: a valve is moved only by its own services; {_VALVE_CLOSING_RULE}")
     return list(dict.fromkeys(problems))
 
 
@@ -326,7 +411,14 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
             if _fold(action) in DENIED_ACTIONS:
                 problems.append(f"{p}: action {action} is not allowed")
             ids = [i for k in TARGET_BEARING_KEYS for i in _entity_ids(node.get(k))] + _entity_ids(node) + _entity_ids({"entity_id": node.get("scene")})
+            # A valve moves one way from here: closed (#527). The service decides, whatever it targets.
+            if dom == VALVE_DOMAIN and not _valve_service_closes(action, _positions_of(node)):
+                problems.append(f"{p}: action {action} is not a service that only closes a valve; {_VALVE_CLOSING_RULE}")
+            for eid in ids:
+                if _domain(eid) == VALVE_DOMAIN and dom != VALVE_DOMAIN:
+                    problems.append(f"{p}: action {action} aimed at {eid} could open a valve; {_VALVE_CLOSING_RULE}")
             if dom == "scene":
+                problems.extend(f"{p}: action {action} could leave {eid} open; a scene may only close a valve" for eid in _scene_valve_ids(node))
                 ids += _scene_entity_ids(node)
             for eid in ids:
                 if _domain(eid) in DENIED_ENTITY_DOMAINS:
@@ -342,6 +434,10 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
         device_domain = node.get("domain")
         if isinstance(device_domain, str) and _fold(device_domain) in DENIED_ENTITY_DOMAINS and ("type" in node or "device_id" in node):
             problems.append(f"{p}: device in denied domain {device_domain}")
+        # A valve device action may only close (#527). Not exempted for a trigger or condition key:
+        # `determine_script_action` settles a node carrying two action keys by `ACTIONS_MAP` order.
+        if isinstance(device_domain, str) and _fold(device_domain) == VALVE_DOMAIN and ("type" in node or "device_id" in node) and node.get("type") != "close":
+            problems.append(f"{p}: device action on a valve could open it; only type close is allowed")
         for k, v in node.items():
             if k in _LIST_KEYS or isinstance(v, (dict, list)):
                 visit(v, f"{p}.{k}")
@@ -460,4 +556,6 @@ def find_scene_policy_violations(config: Any) -> list[str]:
     entities = config.get("entities") if isinstance(config, dict) else None
     if not isinstance(entities, dict):
         return []
-    return [f"entities.{eid}: denied domain {_domain(eid)}" for eid in entities if _domain(eid) in DENIED_ENTITY_DOMAINS]
+    return [f"entities.{eid}: denied domain {_domain(eid)}" for eid in entities if _domain(eid) in DENIED_ENTITY_DOMAINS] + [
+        f"entities.{eid}: a scene may only close a valve" for eid, v in entities.items() if _domain(eid) == VALVE_DOMAIN and not _valve_state_closes(v)
+    ]

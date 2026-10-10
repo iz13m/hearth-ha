@@ -253,7 +253,7 @@ def test_the_service_call_walkers_agree_on_every_shared_case() -> None:
     assert len(cases) > 10, "run pnpm --filter @hearth/shared export:jsonschema first"
     for case in cases:
         i = case["input"]
-        assert find_service_call_violations(i["domain"], i["service"], i["entityIds"]) == case["violations"], case["name"]
+        assert find_service_call_violations(i["domain"], i["service"], i["entityIds"], i.get("data")) == case["violations"], case["name"]
 
 
 def test_our_key_set_matches_home_assistants_service_schema() -> None:
@@ -850,7 +850,7 @@ def test_every_path_writing_service_is_classified() -> None:
     ALL_DENIED_ACTION_DOMAINS = (
         "alarm_control_panel", "auth", "backup", "camera", "cloud", "device_tracker", "ffmpeg",
         "hassio", "lock", "onboarding", "person", "python_script", "recorder", "shell_command",
-        "stream", "update",
+        "siren", "stream", "update",
     )
     for domain in ALL_DENIED_ACTION_DOMAINS:
         assert domain in DENIED_ACTION_DOMAINS, (
@@ -866,7 +866,7 @@ def test_every_path_writing_service_is_classified() -> None:
     # The remaining two lists, with the same ratchet the two above carry (#257). Pinning without a
     # ratchet protects today's entries and not tomorrow's — and "unpinned because it was added
     # later" is exactly the state that left ten domains and eight services deletable-green here.
-    ALL_DENIED_ENTITY_DOMAINS = ("alarm_control_panel", "camera", "device_tracker", "lock", "person")
+    ALL_DENIED_ENTITY_DOMAINS = ("alarm_control_panel", "camera", "device_tracker", "lock", "person", "siren")
     for domain in ALL_DENIED_ENTITY_DOMAINS:
         assert domain in DENIED_ENTITY_DOMAINS, f"{domain} dropped from DENIED_ENTITY_DOMAINS"
     assert set(ALL_DENIED_ENTITY_DOMAINS) == set(DENIED_ENTITY_DOMAINS), (
@@ -996,3 +996,107 @@ def test_every_denied_action_still_exists_in_home_assistant() -> None:
         f"denied but no longer declared by Home Assistant: {missing}. The denial is now inert — "
         "find the new name rather than removing the entry."
     )
+
+
+# Sirens and valves (#527), ruled by the owner. Literal expectations on this side, not the verdicts
+# exported from policy.ts, so removing a rule here fails here and not only in the TypeScript suite.
+_VALVE_RULE = "Hearth only closes a valve (close_valve, or set_valve_position to a literal 0)"
+
+
+def _walk(node: dict) -> list[str]:
+    return find_policy_violations({"actions": [node]})
+
+
+def test_a_siren_is_refused_on_every_path_both_ways() -> None:
+    assert "siren" in DENIED_ACTION_DOMAINS
+    assert "siren" in DENIED_ENTITY_DOMAINS
+    assert find_service_call_violations("siren", "turn_off", ["siren.hall"]) == [
+        "siren.turn_off: domain siren can never be controlled",
+        "siren.hall: entities in siren can never be controlled",
+    ]
+    assert find_service_call_violations("homeassistant", "turn_off", ["siren.hall"]) == ["siren.hall: entities in siren can never be controlled"]
+    assert _walk({"action": "siren.turn_on", "target": {"entity_id": "siren.hall"}}) != []
+    assert _walk({"device_id": "abc", "domain": "siren", "type": "turn_off"}) == ["config.actions[0]: device in denied domain siren"]
+    assert find_scene_policy_violations({"entities": {"siren.hall": "off"}}) == ["entities.siren.hall: denied domain siren"]
+    assert find_reference_violations({"entity_id": "siren.hall"}) != []
+
+
+def test_every_valve_service_that_can_open_is_refused_whatever_it_targets() -> None:
+    for service in ("open_valve", "toggle", "stop_valve", "reverse"):
+        assert find_service_call_violations("valve", service, ["valve.main"]) == [f"valve.{service}: {_VALVE_RULE}"], service
+    assert _walk({"action": "valve.open_valve", "target": {"area_id": "garden"}}) == [
+        f"config.actions[0]: action valve.open_valve is not a service that only closes a valve; {_VALVE_RULE}"
+    ]
+    assert _walk({"service_template": "Valve.Toggle", "entity_id": "valve.main"}) != []
+
+
+def test_a_stop_is_refused_because_it_can_keep_a_valve_from_closing() -> None:
+    assert find_policy_violations(
+        {
+            "triggers": [{"trigger": "state", "entity_id": "valve.main", "to": "closing"}],
+            "actions": [{"action": "valve.stop_valve", "target": {"entity_id": "valve.main"}}],
+        }
+    ) == [f"config.actions[0]: action valve.stop_valve is not a service that only closes a valve; {_VALVE_RULE}"]
+
+
+def test_a_valve_position_must_be_a_literal_zero_that_can_be_read() -> None:
+    def call(data: dict | None) -> list[str]:
+        return find_service_call_violations("valve", "set_valve_position", ["valve.main"], data)
+
+    assert call({"position": 0}) == []
+    for data in ({"position": 100}, {"position": "0"}, {"position": False}, {"position": "{{ 0 }}"}, {}, None):
+        assert call(data) != [], data
+
+    def node(**extra: object) -> list[str]:
+        return _walk({"action": "valve.set_valve_position", "target": {"entity_id": "valve.main"}, **extra})
+
+    assert node(data={"position": 0}) == []
+    assert node(data={"position": 0}, data_template={"position": 0}) == []
+    assert node(data={"position": 0}, data_template={"position": 100}) != []
+    assert node(data="{{ {'position': 0} }}") != []
+    assert node(data={"position": "{{ 0 }}"}) != []
+    assert node() != []
+
+
+def test_a_valve_reached_through_another_domains_service_is_refused() -> None:
+    assert find_service_call_violations("homeassistant", "toggle", ["valve.main"]) == [
+        f"valve.main: a valve is moved only by its own services; {_VALVE_RULE}"
+    ]
+    assert _walk({"action": "homeassistant.toggle", "entity_id": "light.a, valve.main"}) == [
+        f"config.actions[0]: action homeassistant.toggle aimed at valve.main could open a valve; {_VALVE_RULE}"
+    ]
+    assert _walk({"scene": "valve.main"}) != []
+
+
+def test_a_scene_may_only_close_a_valve_and_may_not_snapshot_one() -> None:
+    assert _walk({"action": "scene.apply", "data": {"entities": {"valve.main": "open"}}}) == [
+        "config.actions[0]: action scene.apply could leave valve.main open; a scene may only close a valve"
+    ]
+    assert _walk({"action": "scene.apply", "data_template": {"entities": {"valve.main": {"state": "open"}}}}) != []
+    assert _walk({"action": "scene.apply", "data": {"entities": {"valve.main": {"state": "closed", "current_position": 50}}}}) != []
+    assert _walk({"action": "scene.create", "snapshot_entities": ["valve.main"]}) != []
+    assert _walk({"action": "scene.create", "snapshot_entities": "light.a, valve.main"}) == [
+        "config.actions[0]: action scene.create could leave valve.main open; a scene may only close a valve"
+    ]
+    assert _walk({"action": "scene.apply", "data": {"entities": {"valve.main": "closed", "valve.b": {"state": "closed", "current_position": 0}}}}) == []
+    assert find_scene_policy_violations({"entities": {"valve.main": {"state": "open"}, "valve.b": "closed"}}) == [
+        "entities.valve.main: a scene may only close a valve"
+    ]
+
+
+def test_only_a_closing_valve_device_action_is_allowed() -> None:
+    for kind in ("open", "toggle", "set_position"):
+        assert _walk({"device_id": "abc", "domain": "valve", "type": kind}) == [
+            "config.actions[0]: device action on a valve could open it; only type close is allowed"
+        ], kind
+    assert _walk({"condition": "device", "device_id": "abc", "domain": "Valve", "type": "open"}) != []
+    assert _walk({"device_id": "abc", "domain": "valve", "type": "close"}) == []
+
+
+def test_a_valve_can_always_be_closed() -> None:
+    assert find_service_call_violations("valve", "close_valve", ["valve.main"]) == []
+    assert _walk({"action": "valve.close_valve", "target": {"entity_id": "valve.main"}}) == []
+    assert _walk({"action": "valve.close_valve", "target": {"area_id": "garden"}}) == []
+    # A valve is not hidden from the model: hiding it would stop the model closing one.
+    assert "valve" not in REFERENCEABLE_DENIED_DOMAINS
+    assert find_reference_violations({"entity_id": "valve.main"}) == []
