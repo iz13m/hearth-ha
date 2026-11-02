@@ -82,7 +82,7 @@ async def test_a_renamed_hearth_label_is_still_refused(core: HomeAssistant) -> N
     assert ei.value.code == "method_not_allowed"
 
 
-@pytest.mark.parametrize("domain", ["lock", "camera", "device_tracker", "person", "image", "alarm_control_panel"])
+@pytest.mark.parametrize("domain", ["lock", "camera", "device_tracker", "person", "image", "image_processing", "alarm_control_panel"])
 async def test_an_off_limits_entity_cannot_be_labelled(core: HomeAssistant, domain: str) -> None:
     entity_id = _entity(core, domain, "front")
     d = build_dispatcher(core, CAPS)

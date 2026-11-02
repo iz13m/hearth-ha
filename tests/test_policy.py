@@ -88,6 +88,39 @@ def test_the_reference_walkers_agree_on_every_shared_case() -> None:
         assert find_reference_violations(case["config"]) == case["violations"], case["name"]
 
 
+def _driveway(entity_id: str) -> dict:
+    return {
+        "alias": "Who is at the driveway",
+        "triggers": [{"trigger": "state", "entity_id": "binary_sensor.driveway_motion", "to": "on"}],
+        "actions": [{"action": "notify.mobile_app_phone", "data": {"message": f"{{{{ states('{entity_id}') }}}}"}}],
+    }
+
+
+def test_an_automation_reading_an_image_processing_entity_is_refused() -> None:
+    """Mirror of the #566 case in policy.test.ts: the plate or face name is the entity's state.
+
+    `image.driveway` is the control: refused before the fix, and the refusal the new case must match.
+    """
+    control = find_reference_violations(_driveway("image.driveway"))
+    assert len(control) == 1
+    assert "image.driveway is in a domain Hearth never lets a model reach" in control[0]
+    assert find_reference_violations(_driveway("image_processing.driveway")) == [
+        v.replace("image.driveway", "image_processing.driveway") for v in control
+    ]
+
+
+def test_off_limits_and_the_referenceable_list_are_one_set() -> None:
+    """What the read path never shows and what a model may never name must not drift apart (#566).
+
+    `REFERENCEABLE_DENIED_DOMAINS` is built from the action policy and `OFF_LIMITS` from the read
+    path, so adding a domain to `HIDDEN_DOMAINS` alone leaves a model able to name it in a template
+    and read it through an exposable sensor.
+    """
+    from custom_components.hearth_ai.handlers.registry import OFF_LIMITS
+
+    assert OFF_LIMITS == REFERENCEABLE_DENIED_DOMAINS
+
+
 def test_a_templated_action_name_is_refused() -> None:
     v = find_policy_violations({"actions": [{"action": "{{ 'lock.unlock' }}"}]})
     assert any("is a template" in x for x in v)

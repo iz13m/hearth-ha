@@ -197,7 +197,9 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
         d = _domain(eid)
         if not d:
             problems.append(f"{eid}: malformed entity_id")
-        elif d in DENIED_ENTITY_DOMAINS:
+        # The referenceable list, not only the action list: `devices.call` answers with each target's
+        # state, so an id the read path hides would come back through a call on it (#566).
+        elif d in REFERENCEABLE_DENIED_DOMAINS:
             problems.append(f"{eid}: entities in {d} can never be controlled")
         elif d in ROUTINE_DOMAINS:
             problems.append(f"{eid}: use activate_scene or run_script for {d} entities")
@@ -334,13 +336,16 @@ def _scene_entity_ids(node: dict[str, Any]) -> list[str]:
     return out
 
 
-REFERENCEABLE_DENIED_DOMAINS: frozenset[str] = DENIED_ENTITY_DOMAINS | {"image"}
+REFERENCEABLE_DENIED_DOMAINS: frozenset[str] = DENIED_ENTITY_DOMAINS | {"image", "image_processing"}
 """Domains a model may never name anywhere — mirror of REFERENCEABLE_DENIED_DOMAINS in policy.ts.
 
-`DENIED_ENTITY_DOMAINS` plus `image`: the read path hides `image` while the action policy does not,
-and something that merely *reads* an entity is filtered by the read path's union. Keeping the same
-union here makes "never listed, never readable" and "never referenceable" one set; `OFF_LIMITS` in
-`handlers/registry.py` is the other mirror.
+`DENIED_ENTITY_DOMAINS` plus `image` and `image_processing`: the read path hides both while the
+action list does not, and something that merely *reads* an entity is filtered by the read path's
+union. Keeping the same union here makes "never listed, never readable" and "never referenceable" one
+set; `OFF_LIMITS` in `handlers/registry.py` is the other mirror, and `test_policy.py` asserts the two
+are equal, because adding a domain to `HIDDEN_DOMAINS` alone leaves a model able to name it in a
+template and read it through an exposable sensor (#566). `find_service_call_violations` refuses
+target ids on this list too, because `devices.call` answers with its targets' state.
 """
 
 HOST_SERVICE_DOMAINS: frozenset[str] = frozenset({"shell_command", "python_script", "hassio", "backup"})

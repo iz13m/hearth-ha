@@ -34,8 +34,10 @@ ATTRIBUTE_DENYLIST: frozenset[str] = frozenset(
         "image_url",
     }
 )
-# Domains whose state/attributes are never exposed, even read-only.
-HIDDEN_DOMAINS: frozenset[str] = frozenset({"camera", "device_tracker", "person", "image", "lock"})
+# Domains whose state/attributes are never exposed, even read-only. `image_processing` is here because
+# its state is text read off a camera frame: a plate number, a recognised person's name, a QR code, or
+# a count of people at the camera (#566).
+HIDDEN_DOMAINS: frozenset[str] = frozenset({"camera", "device_tracker", "person", "image", "image_processing", "lock"})
 
 # Never shareable, and never readable in any form that shows a pattern over time. The union of two
 # lists that are nearly but not quite the same: `HIDDEN_DOMAINS` is what the read path hides and has

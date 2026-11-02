@@ -180,6 +180,7 @@ async def test_too_many_buckets_is_refused_before_the_database(recorder_mock, co
         "device_tracker.phone",
         "person.someone",
         "image.doorbell",
+        "image_processing.driveway",
     ],
 )
 async def test_off_limits_domains_are_refused_without_a_query(

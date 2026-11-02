@@ -84,6 +84,31 @@ async def test_never_pushes_an_entity_the_owner_did_not_expose(core: HomeAssista
     assert sent == []
 
 
+async def test_never_pushes_an_image_processing_entity_shared_before_it_was_hidden(core: HomeAssistant) -> None:
+    """Exposed to Assist or not, a plate number read off a camera frame is never pushed (#566).
+
+    `TEST` changes in the same window, so an empty push cannot be a subscriber that never ran.
+    """
+    sent: list[list[dict]] = []
+
+    async def send(batch: list[dict]) -> None:
+        sent.append(batch)
+
+    plate = "image_processing.driveway"
+    core.states.async_set(plate, "unknown")
+    async_expose_entity(core, "conversation", plate, True)
+    s = StateSubscriber(core, send)
+    s.start()
+    try:
+        core.states.async_set(plate, "AB12CDE", {"plates": {"AB12CDE": 97.1}})
+        core.states.async_set(TEST, "on")
+        await _settle(core)
+    finally:
+        s.stop()
+
+    assert [e["entity_id"] for batch in sent for e in batch] == [TEST]
+
+
 async def test_stop_silences_it(core: HomeAssistant) -> None:
     """Nothing queues while the socket is down: the app's fallback poll is what recovers state."""
     sent: list[list[dict]] = []

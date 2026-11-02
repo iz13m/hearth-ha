@@ -58,6 +58,32 @@ async def test_refuses_blocked_domains_entities_and_routines(core: HomeAssistant
     assert core.states.get(TEST).state == "off"
 
 
+async def test_an_exposed_image_processing_entity_cannot_be_called(core: HomeAssistant) -> None:
+    """
+    The read path hides `image_processing` (#566), and `devices.call` answers with the state of every
+    target it ran. So an entity that was already shared, or shared in HA's own Expose screen, handed the
+    model a number plate back through `control_devices` until the call refused the id itself.
+    """
+    scans: list[str] = []
+
+    async def scan(call: object) -> None:
+        scans.append("scan")
+        core.states.async_set("image_processing.driveway", "AB12CDE")
+
+    core.services.async_register("image_processing", "scan", scan)
+    core.states.async_set("image_processing.driveway", "unknown")
+    async_expose_entity(core, "conversation", "image_processing.driveway", True)
+    d = build_dispatcher(core)
+    for domain, service in [("image_processing", "scan"), ("homeassistant", "update_entity")]:
+        assert core.services.has_service(domain, service), f"{domain}.{service} is not registered, so a refusal proves nothing"
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch("devices.call", {"domain": domain, "service": service, "entity_id": ["image_processing.driveway"]})
+        assert ei.value.code == "method_not_allowed", (domain, service)
+        assert ei.value.message == "image_processing.driveway: entities in image_processing can never be controlled"
+    assert scans == []
+    assert core.states.get("image_processing.driveway").state == "unknown"
+
+
 async def test_requires_a_real_exposed_entity_and_service(core: HomeAssistant) -> None:
     d = build_dispatcher(core)
     with pytest.raises(RpcError) as ei:

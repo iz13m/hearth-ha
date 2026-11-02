@@ -63,7 +63,7 @@ async def test_never_offers_a_domain_hearth_cannot_work_with(core: HomeAssistant
     `alarm_control_panel` only in the second. Offering an alarm panel would let an admin share it and
     then read whether the house is armed.
     """
-    off_limits = {"lock", "camera", "device_tracker", "person", "alarm_control_panel", "image"}
+    off_limits = {"lock", "camera", "device_tracker", "person", "alarm_control_panel", "image", "image_processing"}
     for domain in off_limits:
         _register(core, domain, "front")
     rows = await build_dispatcher(core).dispatch("entities.exposable", {})
@@ -154,6 +154,48 @@ async def test_refuses_to_share_a_domain_hearth_cannot_work_with(core: HomeAssis
     ]
     # And the refusal did not quietly happen anyway.
     assert async_should_expose(core, "conversation", lock) is False
+
+
+async def test_image_processing_cannot_be_shared_and_a_shared_one_disappears(core: HomeAssistant) -> None:
+    """An `image_processing` state is text read off a camera frame: a plate number or a name (#566).
+
+    Two homes are covered. In one it was never shared, so sharing it is refused. In the other an
+    admin shared it before this rule, and Assist still says it is exposed: every read must refuse it
+    anyway, and the sharing screen must still list it so that it can be taken back.
+    """
+    from custom_components.hearth_ai.handlers.registry import visible
+    from custom_components.hearth_ai.rpc import RpcError
+
+    d = build_dispatcher(core)
+    fresh = _register(core, "image_processing", "front_gate")
+    out = await d.dispatch("entities.expose", {"entity_ids": [fresh], "expose": True})
+    assert out["changed"] == []
+    assert out["refused"] == [
+        {
+            "entity_id": fresh,
+            "code": "off_limits",
+            "reason": "Hearth never works with image_processing entities",
+            "domain": "image_processing",
+        }
+    ]
+    assert async_should_expose(core, "conversation", fresh) is False
+
+    shared = _register(core, "image_processing", "driveway")
+    core.states.async_set(shared, "AB12CDE", {"plates": {"AB12CDE": 97.1}})
+    async_expose_entity(core, "conversation", shared, True)
+    assert async_should_expose(core, "conversation", shared) is True  # the precondition, not the rule
+
+    assert shared not in {e["entity_id"] for e in await d.dispatch("entities.list", {})}
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("states.get", {"entity_id": shared})
+    assert ei.value.code == "not_found"
+    assert visible(core, shared, er.async_get(core).async_get(shared)) is False
+
+    row = next(r for r in await d.dispatch("entities.exposable", {}) if r["entity_id"] == shared)
+    assert row["exposed"] is True and row["can_share"] is False
+    out = await d.dispatch("entities.expose", {"entity_ids": [shared], "expose": False})
+    assert out["changed"] == [shared]
+    assert async_should_expose(core, "conversation", shared) is False
 
 
 async def test_shares_and_unshares(core: HomeAssistant) -> None:
