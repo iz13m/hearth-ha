@@ -5,14 +5,24 @@
 # written against and not whatever the resolver falls back to (#187):
 # - Python >= 3.14.2: Home Assistant 2026.9 requires it. Asking uv for plain "3.14" can pick a
 #   cached 3.14.0, and the resolver then quietly installs an older Home Assistant.
+# - Python < 3.15: a bare ">=3.14.2" takes the newest interpreter uv knows. When uv 0.13.0 learned 3.15.0
+#   the CI job went from about 1 minute to about 10 (2026-10-10): the pinned wheels (numpy, pydantic-core,
+#   orjson, aiohttp...) have no cp315 builds, so 14 packages compiled from source on every run. Raise the
+#   ceiling when Home Assistant moves to 3.15, not when uv does.
 # - pytest-homeassistant-custom-component is pinned, and each release pins one Home Assistant.
 # - The conversation component's own requirements (hassil, home-assistant-intents,
 #   gazetteer-matcher, …) are read from its manifest in the installed Home Assistant, so they
 #   always match the version Home Assistant itself pins.
+# - No uv config file is read. uv looks upward for uv.toml and a pyproject.toml with [tool.uv], so a
+#   file at the repo root or in packages/ could change the index or the pins without touching this
+#   package, and CI decides whether to run this suite from the paths a change touches
+#   (.github/scripts/ci-python-paths.sh), which do not include those files. This package has no
+#   [tool.uv] of its own, so it loses nothing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export UV_NO_CONFIG=1
 
-PYTHON_SPEC=">=3.14.2"
+PYTHON_SPEC=">=3.14.2,<3.15"
 PHCC_VERSION="0.13.366"   # pins homeassistant==2026.9.3
 HA_VERSION="2026.9.3"
 # Components the tests set up whose requirements Home Assistant would install at runtime.
