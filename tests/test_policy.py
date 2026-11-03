@@ -930,9 +930,24 @@ def test_every_path_writing_service_is_classified() -> None:
         "automation.toggle", "automation.trigger", "automation.turn_off", "automation.turn_on",
         "downloader.download_file", "homeassistant.reload_all", "homeassistant.reload_config_entry",
         "homeassistant.reload_core_config", "homeassistant.restart", "homeassistant.set_location",
-        "homeassistant.stop", "homematicip_cloud.dump_hap_config", "local_file.update_file_path",
-        "logger.set_level", "persistent_notification.dismiss_all", "remote.delete_command",
-        "remote.learn_command", "remote.send_command", "system_log.write", "telegram_bot.download_file",
+        "homeassistant.stop", "homematicip_cloud.dump_hap_config", "isy994.delete_zwave_lock_user_code",
+        "isy994.set_zwave_lock_user_code", "local_file.update_file_path", "logger.set_level",
+        "matter.clear_lock_credential", "matter.clear_lock_user", "matter.get_lock_credential_status",
+        "matter.get_lock_info", "matter.get_lock_users", "matter.set_lock_credential",
+        "matter.set_lock_user", "mqtt.publish", "nuki.lock_n_go", "nuki.set_continuous_mode",
+        "persistent_notification.dismiss_all", "remote.delete_command", "remote.learn_command",
+        "remote.send_command", "rflink.send_command", "rfxtrx.send", "schlage.add_code",
+        "schlage.delete_code", "schlage.get_codes", "subaru.unlock_specific_door", "system_log.write",
+        "telegram_bot.download_file", "vacuum.send_command", "verisure.disable_autolock",
+        "verisure.enable_autolock", "zha.clear_lock_user_code", "zha.disable_lock_user_code",
+        "zha.enable_lock_user_code", "zha.issue_zigbee_cluster_command",
+        "zha.issue_zigbee_group_command", "zha.set_lock_user_code", "zha.set_zigbee_cluster_attribute",
+        "zwave_js.bulk_set_partial_config_parameters", "zwave_js.clear_lock_usercode",
+        "zwave_js.delete_all_credentials", "zwave_js.delete_all_users", "zwave_js.delete_credential",
+        "zwave_js.delete_user", "zwave_js.get_credential_capabilities", "zwave_js.get_lock_usercode",
+        "zwave_js.get_users", "zwave_js.invoke_cc_api", "zwave_js.multicast_set_value",
+        "zwave_js.set_config_parameter", "zwave_js.set_credential", "zwave_js.set_lock_configuration",
+        "zwave_js.set_lock_usercode", "zwave_js.set_user", "zwave_js.set_value",
     )
     for service in ALL_DENIED_ACTIONS:
         assert service in DENIED_ACTIONS, (
@@ -1183,3 +1198,274 @@ def test_a_remote_can_still_be_turned_on_off_or_toggled() -> None:
         assert find_service_call_violations("remote", service, ["remote.living_room"]) == []
         action = {"action": f"remote.{service}", "target": {"entity_id": "remote.living_room"}}
         assert find_policy_violations({"actions": [action]}) == []
+
+
+# #581 option A, Security's measured rows. Literal expectations on this side, as for #527 and #568, so
+# removing an entry here fails here and not only in the TypeScript suite. A lower bound, not the class.
+_SIBLING = "binary_sensor.front_door_lock_door"
+_TARGET_MODE = {"command_class": 98, "property": "targetMode", "value": 0}
+_REACHES_A_LOCK = (
+    {"action": "zwave_js.set_value", "target": {"entity_id": _SIBLING}, "data": _TARGET_MODE},
+    {"action": "zwave_js.set_value", "target": {"device_id": "front_door_lock"}, "data": _TARGET_MODE},
+    {
+        "action": "zwave_js.invoke_cc_api",
+        "target": {"device_id": "front_door_lock"},
+        "data": {"command_class": 98, "method_name": "set", "parameters": [0]},
+    },
+    {
+        "action": "zwave_js.multicast_set_value",
+        "target": {"device_id": ["front_door_lock", "back_door_lock"]},
+        "data": _TARGET_MODE,
+    },
+    {"action": "mqtt.publish", "data": {"topic": "zigbee2mqtt/front_door_lock/set", "payload": '{"state":"UNLOCK"}'}},
+    {
+        "action": "zha.issue_zigbee_cluster_command",
+        "data": {
+            "ieee": "00:0d:6f:00:0a:90:69:e7",
+            "endpoint_id": 1,
+            "cluster_id": 257,
+            "cluster_type": "in",
+            "command": 1,
+            "command_type": "server",
+        },
+    },
+    {"action": "rfxtrx.send", "data": {"event": "0b11000600bcd5d20a010f70"}},
+    {"action": "rflink.send_command", "data": {"device_id": "newkaku_0000c6c2_1", "command": "off"}},
+    # Code Reviewer's same-integration twins. OperatingMode (0x25) 4 is Passage: the door stays unlocked.
+    {
+        "action": "zha.set_zigbee_cluster_attribute",
+        "data": {
+            "ieee": "00:0d:6f:00:0a:90:69:e7",
+            "endpoint_id": 1,
+            "cluster_id": 257,
+            "cluster_type": "in",
+            "attribute": 37,
+            "value": 4,
+        },
+    },
+    {
+        "action": "zha.issue_zigbee_group_command",
+        "data": {"group": 1, "cluster_id": 257, "cluster_type": "in", "command": 1, "args": []},
+    },
+    {"action": "zwave_js.set_config_parameter", "target": {"entity_id": _SIBLING}, "data": {"parameter": 1, "value": 0}},
+    {
+        "action": "zwave_js.bulk_set_partial_config_parameters",
+        "target": {"device_id": "front_door_lock"},
+        "data": {"parameter": 1, "value": 0},
+    },
+)
+
+
+def test_a_service_that_reaches_a_lock_by_node_topic_or_frame_is_refused_when_authored() -> None:
+    """Mirror of `services that reach a lock without naming one (#581, option A)` in policy.test.ts."""
+    for row in _REACHES_A_LOCK:
+        action = row["action"]
+        assert find_policy_violations({"actions": [row]}) == [f"config.actions[0]: action {action} is not allowed"]
+        automation = {
+            "alias": "Let the cleaner in",
+            "triggers": [{"trigger": "time", "at": "09:00:00"}],
+            "actions": [
+                {"if": [{"condition": "state", "entity_id": "input_boolean.cleaner_day", "state": "on"}], "then": [row]}
+            ],
+        }
+        assert find_policy_violations(automation) == [f"config.actions[0].then[0]: action {action} is not allowed"]
+
+
+def test_a_service_that_reaches_a_lock_is_refused_on_control_through_its_door_sensor() -> None:
+    # The sensor itself is not refused, which is the gap: it is exposed by default and is not a lock.
+    assert find_service_call_violations("homeassistant", "update_entity", [_SIBLING]) == []
+    for row in _REACHES_A_LOCK:
+        domain, service = row["action"].split(".", 1)
+        assert find_service_call_violations(domain, service, [_SIBLING], row["data"]) == [f"{row['action']}: not allowed"]
+
+
+_VACUUM_SENT = (
+    {"command": "set_camera_status", "params": {"status": 1}},
+    {
+        "command": "miIO.ota",
+        "params": {
+            "mode": "normal",
+            "install": "1",
+            "app_url": "http://example.invalid/fw.pkg",
+            "file_md5": "0",
+            "proc": "dnld install",
+        },
+    },
+)
+
+
+def test_a_vacuum_raw_command_is_refused_on_control_and_on_authoring() -> None:
+    """Mirror of `vacuum.send_command (#554)` in policy.test.ts."""
+    for data in _VACUUM_SENT:
+        assert find_service_call_violations("vacuum", "send_command", ["vacuum.downstairs"], data) == [
+            "vacuum.send_command: not allowed"
+        ]
+        action = {"action": "vacuum.send_command", "target": {"entity_id": "vacuum.downstairs"}, "data": data}
+        assert find_policy_violations({"actions": [action]}) == [
+            "config.actions[0]: action vacuum.send_command is not allowed"
+        ]
+
+
+def test_the_named_vacuum_services_stay_allowed() -> None:
+    for service in ("start", "pause", "return_to_base", "locate", "set_fan_speed", "clean_area"):
+        assert find_service_call_violations("vacuum", service, ["vacuum.downstairs"]) == [], service
+        action = {"action": f"vacuum.{service}", "target": {"entity_id": "vacuum.downstairs"}}
+        assert find_policy_violations({"actions": [action]}) == [], service
+
+
+# #581 option A, Security's lock-entity sweep. Every row targets the lock **indirectly**: a row aimed at
+# `lock.front_door` is refused by the entity-domain check with or without the entry, so it pins nothing.
+_LOCK_ENTITY_SERVICES = (
+    "zwave_js.set_lock_usercode",
+    "zwave_js.clear_lock_usercode",
+    "zwave_js.set_user",
+    "zwave_js.delete_user",
+    "zwave_js.delete_all_users",
+    "zwave_js.set_credential",
+    "zwave_js.delete_credential",
+    "zwave_js.delete_all_credentials",
+    "zwave_js.set_lock_configuration",
+    "zha.set_lock_user_code",
+    "zha.clear_lock_user_code",
+    "zha.enable_lock_user_code",
+    "zha.disable_lock_user_code",
+    "matter.set_lock_user",
+    "matter.clear_lock_user",
+    "matter.set_lock_credential",
+    "matter.clear_lock_credential",
+    "isy994.set_zwave_lock_user_code",
+    "isy994.delete_zwave_lock_user_code",
+    "schlage.add_code",
+    "schlage.delete_code",
+    "nuki.lock_n_go",
+    "nuki.set_continuous_mode",
+    "subaru.unlock_specific_door",
+    "verisure.enable_autolock",
+    "verisure.disable_autolock",
+    "zwave_js.get_lock_usercode",
+    "zwave_js.get_users",
+    "zwave_js.get_credential_capabilities",
+    "matter.get_lock_info",
+    "matter.get_lock_users",
+    "matter.get_lock_credential_status",
+    "schlage.get_codes",
+)
+_INDIRECT_LOCK_TARGETS = (
+    {"target": {"device_id": "front_door_lock"}},
+    {"target": {"area_id": "hallway"}},
+    {"target": {"floor_id": "ground"}},
+    {"target": {"label_id": "doors"}},
+    {"target": {"entity_id": "all"}},
+    {"device_id": "front_door_lock"},
+    {"data": {"device_id": "front_door_lock"}},
+)
+
+
+def test_a_lock_entity_service_is_refused_when_its_target_names_no_lock() -> None:
+    """Mirror of `lock-entity services aimed at a device or an area (#581, option A)` in policy.test.ts."""
+    assert len(_LOCK_ENTITY_SERVICES) == 33
+    for service in _LOCK_ENTITY_SERVICES:
+        for shape in _INDIRECT_LOCK_TARGETS:
+            action = {"action": service, **shape}
+            assert find_policy_violations({"actions": [action]}) == [
+                f"config.actions[0]: action {service} is not allowed"
+            ], (service, shape)
+
+
+def test_a_lock_entity_service_is_refused_on_control_too() -> None:
+    # Not a hole today: control needs named entity ids and a `lock.*` one is refused. This pins the
+    # name on that walker as well, so the refusal does not depend on that.
+    for service in _LOCK_ENTITY_SERVICES:
+        domain, name = service.split(".", 1)
+        assert find_service_call_violations(domain, name, [_SIBLING]) == [f"{service}: not allowed"]
+
+
+def test_an_indirect_target_still_passes_for_a_service_that_is_not_denied() -> None:
+    # The control: the same shapes on a light are allowed, so the rows above are refused by name.
+    for shape in _INDIRECT_LOCK_TARGETS:
+        assert find_policy_violations({"actions": [{"action": "light.turn_on", **shape}]}) == [], shape
+
+
+def test_lock_unlock_is_refused_on_every_indirect_target_by_its_domain() -> None:
+    # The other control: the domain check, not the name list, refuses this one on the same shapes.
+    for shape in _INDIRECT_LOCK_TARGETS:
+        assert find_policy_violations({"actions": [{"action": "lock.unlock", **shape}]}) == [
+            "config.actions[0]: action lock.unlock targets denied domain lock"
+        ], shape
+
+
+_TWINS = (
+    "zha.set_zigbee_cluster_attribute",
+    "zha.issue_zigbee_group_command",
+    "zwave_js.set_config_parameter",
+    "zwave_js.bulk_set_partial_config_parameters",
+)
+
+
+def test_a_same_integration_twin_is_refused_on_every_indirect_target() -> None:
+    """Mirror of `the same-integration twins on every indirect target (#581, option A)` in policy.test.ts."""
+    for service in _TWINS:
+        for shape in _INDIRECT_LOCK_TARGETS:
+            action = {"action": service, **shape}
+            assert find_policy_violations({"actions": [action]}) == [
+                f"config.actions[0]: action {service} is not allowed"
+            ], (service, shape)
+
+
+# zwave_js calls `zwave_js.<type>` for a device action, passing its `device_id`, so these are the
+# service rows above with no `action` key. Nothing here names a lock entity.
+_SET_VALUE_DEVICE_ACTION = {
+    "device_id": "front_door_lock",
+    "domain": "zwave_js",
+    "type": "set_value",
+    "command_class": 98,
+    "property": "targetMode",
+    "value": 0,
+}
+_SET_CONFIG_PARAMETER_DEVICE_ACTION = {
+    "device_id": "front_door_lock",
+    "domain": "zwave_js",
+    "type": "set_config_parameter",
+    "endpoint": 0,
+    "parameter": 1,
+    "value": 0,
+}
+
+
+def test_a_device_action_that_is_a_denied_service_is_refused() -> None:
+    """Mirror of `device actions that are denied services (#581, option A)` in policy.test.ts."""
+    for node in (_SET_VALUE_DEVICE_ACTION, _SET_CONFIG_PARAMETER_DEVICE_ACTION):
+        kind = node["type"]
+        assert find_policy_violations({"actions": [node]}) == [
+            f"config.actions[0]: device action zwave_js.{kind} is not allowed"
+        ]
+        automation = {
+            "alias": "Let the cleaner in",
+            "triggers": [{"trigger": "time", "at": "09:00:00"}],
+            "actions": [
+                {"if": [{"condition": "state", "entity_id": "input_boolean.cleaner_day", "state": "on"}], "then": [node]}
+            ],
+        }
+        assert find_policy_violations(automation) == [
+            f"config.actions[0].then[0]: device action zwave_js.{kind} is not allowed"
+        ]
+
+
+def test_a_denied_device_action_is_refused_in_mixed_case() -> None:
+    node = {**_SET_VALUE_DEVICE_ACTION, "domain": "ZWave_JS", "type": "Set_Value"}
+    assert find_policy_violations({"actions": [node]}) == [
+        "config.actions[0]: device action ZWave_JS.Set_Value is not allowed"
+    ]
+
+
+def test_a_zwave_device_action_that_is_not_a_denied_service_is_allowed() -> None:
+    # The controls: the check reads `domain.type` against the list, not the integration.
+    ping = {"device_id": "front_door_lock", "domain": "zwave_js", "type": "ping"}
+    assert find_policy_violations({"actions": [ping]}) == []
+    refresh = {
+        "device_id": "front_door_lock",
+        "domain": "zwave_js",
+        "type": "refresh_value",
+        "entity_id": _SIBLING,
+    }
+    assert find_policy_violations({"actions": [refresh]}) == []

@@ -92,6 +92,82 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "remote.send_command",
         "remote.learn_command",
         "remote.delete_command",
+        # Hands a free-form command string to the vendor library unchanged. On Roborock that reaches
+        # the camera (`set_camera_status`, `start_camera_preview`), remote driving and Wi-Fi
+        # deletion; on python-miio, `miIO.ota` installs firmware from a URL the caller picks. A
+        # camera reached through another domain's service. Service-level, ruled by the owner (#554):
+        # the named vacuum services (`start`, `return_to_base`, `clean_area`, …) stay allowed.
+        "vacuum.send_command",
+        # #581 option A: services that address a device by Z-Wave node, Zigbee IEEE address, MQTT
+        # topic or raw 433 MHz frame, so they never name the `lock.*` entity HA exposes for the same
+        # device and the domain lists cannot see them. Each can unlock a door. `zwave_js.set_value`
+        # resolves any entity on a device to its node, so a lock's door `binary_sensor` (exposed by
+        # default) is enough even on the control path; `mqtt.publish` writes Zigbee2MQTT's
+        # `<lock>/set` topic; the ZHA command sends the door-lock cluster (257) directly.
+        # **A lower bound, not the class.** These are the services measured from a name sweep of
+        # `services.yaml`; the next Home Assistant release can add one this list does not name and no
+        # test goes red. The structural fix, an allowlist of the domains a model may call, is #581's
+        # open option B.
+        "zwave_js.set_value",
+        "zwave_js.multicast_set_value",
+        "zwave_js.invoke_cc_api",
+        "mqtt.publish",
+        "zha.issue_zigbee_cluster_command",
+        "rfxtrx.send",
+        "rflink.send_command",
+        # #581 option A, found by Code Reviewer: the same integrations' twins of the entries above,
+        # reaching the lock the same way. ZHA's attribute write sets door-lock attributes such as
+        # OperatingMode and AutoRelockTime by IEEE address; its group command sends the cluster
+        # command to a group. The Z-Wave config-parameter services resolve a lock's door sensor to its
+        # node, as `set_value` does. The cost is the siblings' cost: a household automation setting a
+        # parameter on a device that is not a lock is refused too.
+        "zha.set_zigbee_cluster_attribute",
+        "zha.issue_zigbee_group_command",
+        "zwave_js.set_config_parameter",
+        "zwave_js.bulk_set_partial_config_parameters",
+        # #581 option A, found by Security from #581 option B's draft: services Home Assistant
+        # registers on the `lock` platform itself (`entity_domain=LOCK_DOMAIN`, or
+        # `async_register_entity_service` in an integration's `lock.py`). Named by a `lock.*` entity
+        # they are already refused by the entity-domain check, but HA resolves a `device_id`,
+        # `area_id`, `floor_id` or `label_id` target, or `entity_id: all`, to the locks behind it
+        # (`helpers/service.py`, `referenced | indirectly_referenced`), and none of those names a
+        # `lock.*` entity. So they are refused by name, whatever the target. Three groups: writing a
+        # code or user (a new way in), opening or changing how the lock locks, and reading codes or
+        # users back as a service response. Core integrations only, so a lower bound like the list
+        # above.
+        "zwave_js.set_lock_usercode",
+        "zwave_js.clear_lock_usercode",
+        "zwave_js.set_user",
+        "zwave_js.delete_user",
+        "zwave_js.delete_all_users",
+        "zwave_js.set_credential",
+        "zwave_js.delete_credential",
+        "zwave_js.delete_all_credentials",
+        "zwave_js.set_lock_configuration",
+        "zha.set_lock_user_code",
+        "zha.clear_lock_user_code",
+        "zha.enable_lock_user_code",
+        "zha.disable_lock_user_code",
+        "matter.set_lock_user",
+        "matter.clear_lock_user",
+        "matter.set_lock_credential",
+        "matter.clear_lock_credential",
+        "isy994.set_zwave_lock_user_code",
+        "isy994.delete_zwave_lock_user_code",
+        "schlage.add_code",
+        "schlage.delete_code",
+        "nuki.lock_n_go",
+        "nuki.set_continuous_mode",
+        "subaru.unlock_specific_door",
+        "verisure.enable_autolock",
+        "verisure.disable_autolock",
+        "zwave_js.get_lock_usercode",
+        "zwave_js.get_users",
+        "zwave_js.get_credential_capabilities",
+        "matter.get_lock_info",
+        "matter.get_lock_users",
+        "matter.get_lock_credential_status",
+        "schlage.get_codes",
     }
 )
 DENIED_ENTITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera", "device_tracker", "person", "siren"})
@@ -448,6 +524,16 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
         device_domain = node.get("domain")
         if isinstance(device_domain, str) and _fold(device_domain) in DENIED_ENTITY_DOMAINS and ("type" in node or "device_id" in node):
             problems.append(f"{p}: device in denied domain {device_domain}")
+        # A device action can be a denied service under another name (#581). zwave_js lists
+        # `set_value`, `set_config_parameter`, `set_lock_usercode` and `clear_lock_usercode` as action
+        # types and calls `zwave_js.<type>` with the node's `device_id`, so `{device_id, domain:
+        # "zwave_js", type: "set_value"}` is the `device_id` row of #581 with no `action` key for the
+        # check above to read. Triggers and conditions are not exempted, as above, so a trigger or
+        # condition whose `domain.type` spells a denied service is refused too; that fails closed.
+        # ZHA's `warn` and `squawk` are not service names, so this does not reach them (#662).
+        device_type = node.get("type")
+        if isinstance(device_domain, str) and isinstance(device_type, str) and f"{_fold(device_domain)}.{_fold(device_type)}" in DENIED_ACTIONS:
+            problems.append(f"{p}: device action {device_domain}.{device_type} is not allowed")
         # A valve device action may only close (#527). Not exempted for a trigger or condition key:
         # `determine_script_action` settles a node carrying two action keys by `ACTIONS_MAP` order.
         if isinstance(device_domain, str) and _fold(device_domain) == VALVE_DOMAIN and ("type" in node or "device_id" in node) and node.get("type") != "close":
