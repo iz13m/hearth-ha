@@ -83,6 +83,15 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "automation.turn_on",
         "automation.turn_off",
         "automation.toggle",
+        # A remote plays whatever the household taught it, and an RF-capable one (Broadlink's RM Pro)
+        # can learn an alarm keyfob, a siren or a lock: a device `DENIED_ENTITY_DOMAINS` refuses by
+        # domain that HA never sees as one. `send_command` plays a learned code by name or any raw
+        # `b64:` code; `learn_command` adds one; `delete_command` erases codes only the physical remote
+        # can teach again. On/off/toggle stay allowed (#568). Refused for every Hearth caller, not
+        # only the model: neither the app nor voice offers these.
+        "remote.send_command",
+        "remote.learn_command",
+        "remote.delete_command",
     }
 )
 DENIED_ENTITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera", "device_tracker", "person", "siren"})

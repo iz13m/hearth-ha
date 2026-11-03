@@ -931,8 +931,8 @@ def test_every_path_writing_service_is_classified() -> None:
         "downloader.download_file", "homeassistant.reload_all", "homeassistant.reload_config_entry",
         "homeassistant.reload_core_config", "homeassistant.restart", "homeassistant.set_location",
         "homeassistant.stop", "homematicip_cloud.dump_hap_config", "local_file.update_file_path",
-        "logger.set_level", "persistent_notification.dismiss_all", "system_log.write",
-        "telegram_bot.download_file",
+        "logger.set_level", "persistent_notification.dismiss_all", "remote.delete_command",
+        "remote.learn_command", "remote.send_command", "system_log.write", "telegram_bot.download_file",
     )
     for service in ALL_DENIED_ACTIONS:
         assert service in DENIED_ACTIONS, (
@@ -1138,3 +1138,48 @@ def test_a_valve_can_always_be_closed() -> None:
     # A valve is not hidden from the model: hiding it would stop the model closing one.
     assert "valve" not in REFERENCEABLE_DENIED_DOMAINS
     assert find_reference_violations({"entity_id": "valve.main"}) == []
+
+
+_RF = "b64:JgBQAAABKZIUEhQ2FBIUNhQSFBIUEhQSFDYUEhQ2FBIUNhQSFDYUNhQ2FBIUEhQSFBIUNhQ2FDYUEhQSFDYUNhQ2AA0FAAAAAAAAAAAAAAAA"
+_REMOTE_REFUSED = (
+    ("send_command", {"device": "alarm_keyfob", "command": ["disarm"]}),
+    ("send_command", {"command": [_RF]}),
+    ("learn_command", {"device": "alarm_keyfob", "command": ["disarm"]}),
+    ("delete_command", {"device": "alarm_keyfob", "command": ["disarm"]}),
+)
+
+
+def test_a_remote_code_is_refused_on_control_and_on_authoring() -> None:
+    """Mirror of `remote codes (#568)` in policy.test.ts, with Security's fixtures.
+
+    A remote plays whatever the household taught it, and an RF-capable one can learn an alarm
+    keyfob, a siren or a lock: a device Hearth refuses by domain that HA never sees as one.
+    """
+    for service, data in _REMOTE_REFUSED:
+        full = f"remote.{service}"
+        assert find_service_call_violations("remote", service, ["remote.living_room"], data) == [f"{full}: not allowed"]
+        action = {"action": full, "target": {"entity_id": "remote.living_room"}, "data": data}
+        assert find_policy_violations({"actions": [action]}) == [f"config.actions[0]: action {full} is not allowed"]
+
+
+def test_a_remote_code_nested_in_an_authored_automation_is_refused() -> None:
+    send = {"action": "remote.send_command", "target": {"entity_id": "remote.living_room"}, "data": _REMOTE_REFUSED[0][1]}
+    automation = {
+        "alias": "Disarm when I get home",
+        "triggers": [{"trigger": "state", "entity_id": "binary_sensor.front_door", "to": "on"}],
+        "actions": [{"choose": [{"conditions": [], "sequence": [{"delay": "00:00:05"}, send]}]}],
+    }
+    assert find_policy_violations(automation) == [
+        "config.actions[0].choose[0].sequence[1]: action remote.send_command is not allowed"
+    ]
+    script = {"alias": "disarm", "sequence": [{"repeat": {"count": 2, "sequence": [send]}}]}
+    assert find_policy_violations(script) == [
+        "config.sequence[0].repeat.sequence[0]: action remote.send_command is not allowed"
+    ]
+
+
+def test_a_remote_can_still_be_turned_on_off_or_toggled() -> None:
+    for service in ("turn_on", "turn_off", "toggle"):
+        assert find_service_call_violations("remote", service, ["remote.living_room"]) == []
+        action = {"action": f"remote.{service}", "target": {"entity_id": "remote.living_room"}}
+        assert find_policy_violations({"actions": [action]}) == []

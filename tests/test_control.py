@@ -318,3 +318,42 @@ async def test_a_script_hearth_presents_as_a_scene_is_checked_when_it_runs(core:
     async_expose_entity(core, "conversation", "script.film_time", True)
     await hl.async_mark_hearth_scene(core, "script.film_time", True)
     assert (await d.dispatch("scripts.run", {"entity_id": "script.film_time"}))["entity_id"] == "script.film_time"
+
+
+async def test_a_hearth_scene_script_that_sends_a_remote_code_is_refused_when_it_runs(
+    core: HomeAssistant, tmp_path: Path
+) -> None:
+    """#568: a scene stored as a labelled script cannot play a learned code, whenever it was written.
+
+    The script is written to `scripts.yaml` directly, as a script authored before the refusal would
+    be, so only the run-time scan stands between it and the remote. Unlabelled, it still runs: a
+    plain script is not re-scanned (AgDR-0005), which is the known limit #568 records.
+    """
+    from pytest_homeassistant_custom_component.common import async_mock_service
+
+    from custom_components.hearth_ai import labels as hl
+
+    await hl.async_ensure_labels(core)
+    sent = async_mock_service(core, "remote", "send_command")
+    (tmp_path / "scripts.yaml").write_text(
+        "disarm:\n  alias: Disarm\n  sequence:\n  - action: remote.send_command\n    target:\n"
+        "      entity_id: remote.living_room\n    data:\n      device: alarm_keyfob\n      command: disarm\n"
+    )
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+    async_expose_entity(core, "conversation", "script.disarm", True)
+    d = build_dispatcher(core)
+
+    await hl.async_mark_hearth_scene(core, "script.disarm", True)
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("scripts.run", {"entity_id": "script.disarm"})
+    assert ei.value.code == "method_not_allowed"
+    assert "action remote.send_command is not allowed" in ei.value.message
+    await core.async_block_till_done()
+    assert sent == []
+
+    # The control, and the limit: the same script unlabelled reaches the remote.
+    await hl.async_mark_hearth_scene(core, "script.disarm", False)
+    await d.dispatch("scripts.run", {"entity_id": "script.disarm"})
+    await core.async_block_till_done()
+    assert [c.data.get("device") for c in sent] == ["alarm_keyfob"]
