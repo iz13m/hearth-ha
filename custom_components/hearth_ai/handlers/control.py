@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
 
 from ..labels import is_hearth_scene
@@ -62,10 +62,18 @@ async def _settled(hass: HomeAssistant, entity_ids: list[str], call: Any) -> Non
 
     The listener is registered *before* the service call so an integration that writes state
     synchronously cannot slip through the gap between the two.
+
+    `_seen` is a `@callback` so Home Assistant runs it on the event loop. Without the decorator HA
+    treats a plain function as an executor job and runs it on a worker thread, where
+    `asyncio.Event.set()` is not safe (#649). Under asyncio's debug mode, which Home Assistant's test
+    harness turns on, `set()` marks the waiter's future done and then raises from `call_soon`, so the
+    waiting task is never scheduled and neither the settle timeout nor `CALL_TIMEOUT_S` brings it back.
+    Outside debug mode nothing raises, but the loop is not woken and `waiting` is shared across threads.
     """
     waiting = set(entity_ids)
     done = asyncio.Event()
 
+    @callback
     def _seen(event: Event[EventStateChangedData]) -> None:
         waiting.discard(event.data["entity_id"])
         if not waiting:

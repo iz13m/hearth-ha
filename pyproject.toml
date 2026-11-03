@@ -19,6 +19,14 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+# A hung test ends the run after a minute, with every thread's stack, and not at CI's job limit
+# (#649). `thread` and not the default `signal`: on a real hang the signal method failed the test at
+# 60 s and the run then stayed stuck in teardown until it was killed; `thread` dumps the stacks and
+# exits the process. The cost is that tests after the hung one do not run. pytest-timeout is pinned by
+# pytest-homeassistant-custom-component, so it is always in the venv test.sh builds. The slowest test
+# takes a few seconds, so this only ever fires on a hang.
+timeout = 60
+timeout_method = "thread"
 
 [tool.ruff]
 line-length = 120

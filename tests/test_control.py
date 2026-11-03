@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -231,6 +232,38 @@ async def test_reports_the_state_the_device_actually_reached(core: HomeAssistant
     result = await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_off", "entity_id": [TEST]})
     assert result["entities"] == [{"entity_id": TEST, "state": "off"}], "reported a state the device had not reached"
     assert core.states.get(TEST).state == "off"
+
+
+async def test_the_settle_listener_wakes_the_call_on_the_event_loop(
+    core: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    #649: `_seen` was a plain function, which Home Assistant runs as an executor job, so
+    `asyncio.Event.set()` ran on a worker thread. Event is not thread-safe. In the test harness
+    (asyncio debug mode) `set()` raised `RuntimeError: Non-thread-safe operation invoked on an event
+    loop other than the current one` after marking the waiter's future done, so on runs where the
+    call was already waiting the task sat on a finished future with nothing scheduled, past both the
+    settle timeout and `CALL_TIMEOUT_S`, until CI's 30-minute limit.
+
+    The hang itself is a race, so this pins its cause rather than waiting for it: the thread that
+    sets the event. The `assert set_from` below is the control. If the listener never fired, the
+    thread assertion would pass with nothing recorded.
+    """
+    loop_thread = threading.get_ident()
+    set_from: list[int] = []
+
+    class RecordingEvent(asyncio.Event):
+        def set(self) -> None:
+            set_from.append(threading.get_ident())
+            super().set()
+
+    monkeypatch.setattr(asyncio, "Event", RecordingEvent)
+    d = build_dispatcher(core)
+    assert core.states.get(TEST).state == "off"
+    result = await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_on", "entity_id": [TEST]})
+    assert result["entities"] == [{"entity_id": TEST, "state": "on"}]
+    assert set_from, "the state change never reached the settle listener, so the thread check below proves nothing"
+    assert set(set_from) == {loop_thread}, "the settle listener set its Event off the event loop thread"
 
 
 async def test_a_command_that_changes_nothing_still_answers(core: HomeAssistant) -> None:
