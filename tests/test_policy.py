@@ -12,7 +12,9 @@ from custom_components.hearth_ai.policy import (
     TARGET_BEARING_KEYS,
     DENIED_ACTION_DOMAINS,
     DENIED_ACTIONS,
+    DENIED_DEVICE_ACTIONS,
     DENIED_ENTITY_DOMAINS,
+    DEVICE_ACTION_SERVICES,
     HOST_SERVICE_DOMAINS,
     REFERENCEABLE_DENIED_DOMAINS,
     _fold,
@@ -30,6 +32,8 @@ def test_lists_match_shared() -> None:
     data = json.loads(SCHEMA.read_text())
     assert set(data["denied_action_domains"]) == DENIED_ACTION_DOMAINS
     assert set(data["denied_actions"]) == DENIED_ACTIONS
+    assert data["device_action_services"] == dict(DEVICE_ACTION_SERVICES)
+    assert set(data["denied_device_actions"]) == DENIED_DEVICE_ACTIONS
     assert set(data["denied_entity_domains"]) == DENIED_ENTITY_DOMAINS
     assert set(data["referenceable_denied_domains"]) == REFERENCEABLE_DENIED_DOMAINS
     assert set(data["host_service_domains"]) == HOST_SERVICE_DOMAINS
@@ -942,6 +946,7 @@ def test_every_path_writing_service_is_classified() -> None:
         "verisure.enable_autolock", "zha.clear_lock_user_code", "zha.disable_lock_user_code",
         "zha.enable_lock_user_code", "zha.issue_zigbee_cluster_command",
         "zha.issue_zigbee_group_command", "zha.set_lock_user_code", "zha.set_zigbee_cluster_attribute",
+        "zha.warning_device_squawk", "zha.warning_device_warn",
         "zwave_js.bulk_set_partial_config_parameters", "zwave_js.clear_lock_usercode",
         "zwave_js.delete_all_credentials", "zwave_js.delete_all_users", "zwave_js.delete_credential",
         "zwave_js.delete_user", "zwave_js.get_credential_capabilities", "zwave_js.get_lock_usercode",
@@ -1469,3 +1474,92 @@ def test_a_zwave_device_action_that_is_not_a_denied_service_is_allowed() -> None
         "entity_id": _SIBLING,
     }
     assert find_policy_violations({"actions": [refresh]}) == []
+
+
+# #662: a ZHA siren sounded by its IEEE address or its device, never naming the `siren.*` entity.
+_ZHA_IEEE = "00:0d:6f:00:0a:90:69:e7"
+_ZHA_WARNING_DEVICE_ACTIONS = (
+    {"device_id": "hallway_siren", "domain": "zha", "type": "warn"},
+    {"device_id": "hallway_siren", "domain": "zha", "type": "squawk"},
+)
+
+
+def test_a_zha_siren_by_ieee_is_refused_on_control_and_on_authoring() -> None:
+    """Mirror of `a ZHA siren sounded by IEEE or by device (#662)` in policy.test.ts."""
+    for service in ("warning_device_warn", "warning_device_squawk"):
+        assert f"zha.{service}" in DENIED_ACTIONS
+        # The control path: `devices.call` needs an entity, so it is a sensor on the same device.
+        assert find_service_call_violations("zha", service, ["sensor.hallway_siren_battery"], {"ieee": _ZHA_IEEE}) == [
+            f"zha.{service}: not allowed"
+        ]
+        action = {"action": f"zha.{service}", "data": {"ieee": _ZHA_IEEE}}
+        assert find_policy_violations({"actions": [action]}) == [f"config.actions[0]: action zha.{service} is not allowed"]
+
+
+def test_a_zha_warning_device_action_is_refused() -> None:
+    for node in _ZHA_WARNING_DEVICE_ACTIONS:
+        kind = node["type"]
+        assert find_policy_violations({"actions": [node]}) == [f"config.actions[0]: device action zha.{kind} is not allowed"]
+        automation = {
+            "alias": "Sound the hallway",
+            "triggers": [{"trigger": "time", "at": "03:00:00"}],
+            "actions": [{"if": [{"condition": "state", "entity_id": "input_boolean.away", "state": "on"}], "then": [node]}],
+        }
+        assert find_policy_violations(automation) == [f"config.actions[0].then[0]: device action zha.{kind} is not allowed"]
+    mixed = {"device_id": "hallway_siren", "domain": "ZHA", "type": "Warn"}
+    assert find_policy_violations({"actions": [mixed]}) == ["config.actions[0]: device action ZHA.Warn is not allowed"]
+
+
+def test_each_device_action_service_is_denied() -> None:
+    # An entry whose service is not denied refuses nothing, and no test above would say so.
+    assert sorted(DEVICE_ACTION_SERVICES) == ["zha.squawk", "zha.warn"]
+    for service in DEVICE_ACTION_SERVICES.values():
+        assert service in DENIED_ACTIONS
+
+
+def test_a_zha_device_action_that_is_not_a_warning_device_is_allowed() -> None:
+    # The controls: Inovelli's LED effects are the other ZHA device actions on 2026.9.3.
+    led = {"device_id": "hall_switch", "domain": "zha", "effect_type": "Fast_Blink", "color": 200, "level": 100, "duration": 5}
+    assert find_policy_violations({"actions": [{**led, "type": "issue_all_led_effect"}]}) == []
+    assert find_policy_violations({"actions": [{**led, "type": "issue_individual_led_effect", "led_number": 1}]}) == []
+
+
+# #662: an RFXtrx siren sounded by a device action that calls a method on the device, not a service.
+_RFXTRX_SIREN_DEVICE_ACTIONS = (
+    {"device_id": "hall_chime", "domain": "rfxtrx", "type": "send_command", "subtype": "Chime"},
+    {"device_id": "hall_panic", "domain": "rfxtrx", "type": "send_status", "subtype": "Panic"},
+)
+
+
+def test_an_rfxtrx_device_action_is_refused() -> None:
+    """Mirror of `an RFXtrx siren sounded by a device action (#662)` in policy.test.ts."""
+    for node in _RFXTRX_SIREN_DEVICE_ACTIONS:
+        kind = node["type"]
+        assert find_policy_violations({"actions": [node]}) == [f"config.actions[0]: device action rfxtrx.{kind} is not allowed"]
+        automation = {
+            "alias": "Sound the hallway",
+            "triggers": [{"trigger": "time", "at": "03:00:00"}],
+            "actions": [{"if": [{"condition": "state", "entity_id": "input_boolean.away", "state": "on"}], "then": [node]}],
+        }
+        assert find_policy_violations(automation) == [f"config.actions[0].then[0]: device action rfxtrx.{kind} is not allowed"]
+
+
+def test_an_rfxtrx_device_action_in_mixed_case_is_refused() -> None:
+    chime = {"device_id": "hall_chime", "domain": "RFXtrx", "type": "Send_Command", "subtype": "Chime"}
+    assert find_policy_violations({"actions": [chime]}) == ["config.actions[0]: device action RFXtrx.Send_Command is not allowed"]
+    panic = {"device_id": "hall_panic", "domain": "rfxtrx", "type": "SEND_STATUS", "subtype": "Panic"}
+    assert find_policy_violations({"actions": [panic]}) == ["config.actions[0]: device action rfxtrx.SEND_STATUS is not allowed"]
+
+
+def test_denied_device_actions_are_both_rfxtrx_types_and_no_service() -> None:
+    assert sorted(DENIED_DEVICE_ACTIONS) == ["rfxtrx.send_command", "rfxtrx.send_status"]
+    assert not DENIED_DEVICE_ACTIONS & DENIED_ACTIONS
+
+
+def test_an_rfxtrx_device_trigger_is_allowed() -> None:
+    # RFXtrx's trigger types are `command` and `status`; the list names action types only.
+    automation = {
+        "triggers": [{"trigger": "device", "device_id": "hall_remote", "domain": "rfxtrx", "type": "command", "subtype": "On"}],
+        "actions": [{"action": "light.turn_on", "target": {"entity_id": "light.hall"}}],
+    }
+    assert find_policy_violations(automation) == []

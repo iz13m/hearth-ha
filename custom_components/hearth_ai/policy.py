@@ -7,6 +7,8 @@ denied services into automations/scripts/scenes that HA would then run on its be
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 DENIED_ACTION_DOMAINS: frozenset[str] = frozenset(
@@ -168,8 +170,30 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "matter.get_lock_users",
         "matter.get_lock_credential_status",
         "schlage.get_codes",
+        # #662, the #581 option-A row for a siren: ZHA sounds a warning device by its Zigbee IEEE
+        # address, so these name no `siren.*` entity, while ZHA exposes the same device as `siren.*`.
+        # ZHA's `warn` and `squawk` device actions call them too, through `DEVICE_ACTION_SERVICES`.
+        "zha.warning_device_squawk",
+        "zha.warning_device_warn",
     }
 )
+# A device action whose `type` calls a service by another name (#662), keyed by folded `domain.type`.
+# Mirror of `DEVICE_ACTION_SERVICES` in policy.ts, pinned by `test_lists_match_shared`. zwave_js needs
+# no entry: its action types are its service names. ZHA maps `squawk` and `warn` to the two
+# `warning_device_*` services (`zha/device_action.py`, `SERVICE_NAMES`) and calls them by IEEE address.
+DEVICE_ACTION_SERVICES: Mapping[str, str] = MappingProxyType(
+    {
+        "zha.squawk": "zha.warning_device_squawk",
+        "zha.warn": "zha.warning_device_warn",
+    }
+)
+# A device action refused by its own folded `domain.type`, because it calls no service (#662). Mirror
+# of `DENIED_DEVICE_ACTIONS` in policy.ts, pinned by `test_lists_match_shared`. RFXtrx's two action
+# types call `getattr(device, type)` (`rfxtrx/device_action.py`), the same method its `siren.*` entity
+# sounds with: `RfxtrxChime` through `send_command`, `RfxtrxSecurityPanic` through
+# `send_status("Panic")` (`rfxtrx/siren.py`). Both types, so every RFXtrx device action is refused;
+# its device triggers (`command`, `status`) are not.
+DENIED_DEVICE_ACTIONS: frozenset[str] = frozenset({"rfxtrx.send_command", "rfxtrx.send_status"})
 DENIED_ENTITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera", "device_tracker", "person", "siren"})
 
 # Valves move one way only from Hearth: closed (#527). Mirror of the valve rule in policy.ts, whose
@@ -530,10 +554,14 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
         # "zwave_js", type: "set_value"}` is the `device_id` row of #581 with no `action` key for the
         # check above to read. Triggers and conditions are not exempted, as above, so a trigger or
         # condition whose `domain.type` spells a denied service is refused too; that fails closed.
-        # ZHA's `warn` and `squawk` are not service names, so this does not reach them (#662).
+        # ZHA's `warn` and `squawk` are not service names, so they are read through
+        # `DEVICE_ACTION_SERVICES` first (#662). RFXtrx's call no service, so they are refused by
+        # name through `DENIED_DEVICE_ACTIONS` (#662).
         device_type = node.get("type")
-        if isinstance(device_domain, str) and isinstance(device_type, str) and f"{_fold(device_domain)}.{_fold(device_type)}" in DENIED_ACTIONS:
-            problems.append(f"{p}: device action {device_domain}.{device_type} is not allowed")
+        if isinstance(device_domain, str) and isinstance(device_type, str):
+            named = f"{_fold(device_domain)}.{_fold(device_type)}"
+            if DEVICE_ACTION_SERVICES.get(named, named) in DENIED_ACTIONS or named in DENIED_DEVICE_ACTIONS:
+                problems.append(f"{p}: device action {device_domain}.{device_type} is not allowed")
         # A valve device action may only close (#527). Not exempted for a trigger or condition key:
         # `determine_script_action` settles a node carrying two action keys by `ACTIONS_MAP` order.
         if isinstance(device_domain, str) and _fold(device_domain) == VALVE_DOMAIN and ("type" in node or "device_id" in node) and node.get("type") != "close":
