@@ -321,7 +321,7 @@ async def helpers_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     config = params.get("config")
     if not isinstance(config, dict):
         raise RpcError("invalid_params", "config must be an object")
-    check_flow_input(config)
+    check_flow_input(hass, config)
 
     if domain in INPUT_DOMAINS:
         store = _collection(hass, domain)
@@ -389,7 +389,7 @@ async def helpers_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     config = params.get("config")
     if not isinstance(config, dict):
         raise RpcError("invalid_params", "config must be an object")
-    check_flow_input(config)
+    check_flow_input(hass, config)
 
     split = _split_input_id(helper_id)
     if split is None:

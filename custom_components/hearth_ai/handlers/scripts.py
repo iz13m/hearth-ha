@@ -21,6 +21,7 @@ from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import _exposed
+from .resolve import resolve_registry_ids
 from .scenes import find_config_violations, find_nested_scene_violations
 
 _SLUG = re.compile(r"^[a-z0-9_]+$")
@@ -109,6 +110,15 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
     wrote somewhere Hearth cannot read — a package, a blueprint — has no config here, so nothing is
     found and it runs exactly as AgDR-0005 always let a script run. That is not a new hole: labelling
     such a script grants it nothing it could not already do through `scripts.run`.
+
+    **Registry ids are resolved (#663), and one that does not resolve is not refused here.** Authoring
+    refuses it because a stored config waits, and HA gives a deleted entity's id back on restore. A
+    run is now: HA resolves each step's `target.entity_id` as the step executes and raises on an id it
+    cannot resolve (`helpers/service.py:305-319`, `async_validate_entity_ids`), so that step reaches
+    nothing. Refusing would only stop the steps before it, in the household's own script.
+
+    The residual case is a restore *during* the run: the owner restores the deleted entity while the
+    labelled script is partway through, in a `delay` say, and HA resolves the later step to it.
     """
     key = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
     path = _path(hass)
@@ -117,6 +127,7 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
     config = plain(data[key]) if isinstance(data, dict) and key in data else None
     if config is None:
         return []
+    config, _unresolved = resolve_registry_ids(hass, config)  # unresolved is allowed, see above
     problems = find_policy_violations(config) + find_reference_violations(config, "config")
     problems += await find_nested_scene_violations(hass, config)
     return list(dict.fromkeys(problems))

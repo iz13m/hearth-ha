@@ -31,6 +31,7 @@ from homeassistant.helpers import config_validation as cv
 from ..const import DOMAIN
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import RpcError
+from .resolve import resolve_registry_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -287,12 +288,14 @@ def check_secrets(hass: HomeAssistant, flow_id: str, user_input: dict[str, Any])
         )
 
 
-def check_flow_input(config: Any) -> None:
+def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     """The action policy, applied to form values exactly as it is to an authored automation.
 
     See the module docstring for why a form field needs this at all. The hub refuses the same input
-    before it leaves (`flowInputPolicyCheck` in methods.ts); neither side is the only guard.
+    before it leaves (`flowInputPolicyCheck` in methods.ts); neither side is the only guard. Registry
+    ids are resolved first (#663), under any key, since an `EntitySelector` field can have any name.
     """
-    problems = find_policy_violations(config, "input") + find_reference_violations(config, "input")
+    config, problems = resolve_registry_ids(hass, config, "input", any_key=True)
+    problems += find_policy_violations(config, "input") + find_reference_violations(config, "input")
     if problems:
         raise RpcError("validation_failed", "Hearth will not save that: " + "; ".join(problems[:10]))

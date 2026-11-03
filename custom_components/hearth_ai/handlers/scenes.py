@@ -19,6 +19,7 @@ from ..policy import TARGET_BEARING_KEYS, VALVE_DOMAIN, _entity_ids, _fold, _ser
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import _exposed
+from .resolve import resolve_registry_ids
 
 
 def _path(hass: HomeAssistant) -> str:
@@ -142,8 +143,10 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
     Kept here because `automations.py` and `scripts.py` must ask exactly the same question — the
     pair of `_validate` functions drifting is the shape of bug this module already exists to stop.
     """
+    config, unresolved = resolve_registry_ids(hass, config)  # #663: checks read the resolved copy
     return (
-        find_policy_violations(config)
+        unresolved
+        + find_policy_violations(config)
         + find_reference_violations(config, "config")
         + await find_nested_scene_violations(hass, config)
         + await find_nested_script_violations(hass, config)
@@ -238,6 +241,11 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
     Because `_script_raw_config` reads the running instance rather than `scripts.yaml`, "cannot
     read" now means Home Assistant itself has no such script, not "not in the file we happened to
     read" — so a household keeping scripts in `packages/` is unaffected.
+
+    **Registry ids are resolved one hop removed too (#663), and one that does not resolve is refused**,
+    as at the top level. That has a cost the top level does not: the started script is the owner's, so
+    a registry id they wrote by hand into a service target, for an entity since deleted, now blocks
+    every Hearth automation that starts that script. `main` allowed it.
     """
     problems: list[str] = []
     checked: set[str] = set()
@@ -267,6 +275,8 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
             problems.append(f"{path}: {entity_id} is built from a blueprint Home Assistant could not load, so what it would do cannot be checked")
             return
         where = f"{path}->{entity_id}"
+        raw, unresolved = resolve_registry_ids(hass, raw, where)  # #663, one hop removed
+        problems.extend(unresolved)
         # **What a script can do, not what it mentions.** Deliberately *without*
         # `find_reference_violations`, which the scene precedent also omits — `scene_run_violations`
         # checks membership domains only. Running it here refused an ordinary household script for
