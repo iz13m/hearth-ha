@@ -13,9 +13,11 @@ Two rules make this safe to hand a model.
 **Hearth's own labels are not an AI control.** `Hearth: tile`, `read only`, `setting`, `diagnostic`
 and `hide` decide how the app presents a device (AgDR-0034), and the hub deliberately strips
 `hearth_labels` from every non-app surface. A model that could rename, delete or apply one could
-change what the household sees, so `role_of` is consulted on every write here and any hit is
-refused. It resolves by stored id **and** by name, so renaming one out of the way does not work
-either.
+change what the household sees. `Hearth: scene` is not a presentation role, but it marks the
+scripts that are checked each time they run (AgDR-0044), so a model that could strip or delete it
+could switch that check off (#617). So `hearth_label_of`, which knows every label in `ALL_LABELS`,
+is consulted on every write here and any hit is refused. It resolves by stored id **and** by name,
+so renaming one out of the way does not work either.
 
 **Only things the model may already see can be labelled.** That is Assist exposure for a device, and
 membership of `automation`/`script`/`scene` for the things categories are for — those are never
@@ -30,7 +32,7 @@ from typing import Any
 from homeassistant.helpers import category_registry as cr, entity_registry as er, label_registry as lr
 from homeassistant.core import HomeAssistant
 
-from ..labels import ROLES, role_of
+from ..labels import ALL_LABELS, ROLES, hearth_label_of
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .registry import OFF_LIMITS, visible
@@ -43,12 +45,13 @@ MAX_TARGETS = 100
 
 
 def _check_not_hearths(hass: HomeAssistant, label_id: str) -> None:
-    """Refuse to touch one of Hearth's own presentation labels (AgDR-0034)."""
-    role = role_of(hass, label_id)
+    """Refuse to touch one of Hearth's own labels: the presentation five (AgDR-0034) and `Hearth: scene` (#617)."""
+    role = hearth_label_of(hass, label_id)
     if role is not None:
+        what = "decides how the app shows a device" if role in ROLES else "marks a script whose contents are checked each time it runs"
         raise RpcError(
             "method_not_allowed",
-            f"'{ROLES[role]}' is one of Hearth's own labels and decides how the app shows a device; "
+            f"'{ALL_LABELS[role]}' is one of Hearth's own labels and {what}; "
             "it is changed in Home Assistant by a person, never from here",
         )
 
@@ -66,8 +69,9 @@ def _label_dto(hass: HomeAssistant, label: Any) -> dict[str, Any]:
         "name": label.name,
         "icon": label.icon,
         "description": label.description,
-        # True for Hearth's own five: listed so a model can see them and leave them alone.
-        "hearth": role_of(hass, label.label_id) is not None,
+        # True for each of Hearth's own labels: listed so a model can see them and leave them alone.
+        # The same lookup as `_check_not_hearths`, so the flag and the refusal cannot disagree.
+        "hearth": hearth_label_of(hass, label.label_id) is not None,
     }
 
 

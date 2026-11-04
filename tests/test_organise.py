@@ -12,7 +12,7 @@ from homeassistant.components.homeassistant.exposed_entities import async_expose
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import category_registry as cr, entity_registry as er, label_registry as lr
 
-from custom_components.hearth_ai.labels import async_ensure_labels
+from custom_components.hearth_ai.labels import ALL_LABELS, async_ensure_labels, async_mark_hearth_scene, is_hearth_scene
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 CAPS = frozenset({"labels.manage"})
@@ -53,7 +53,9 @@ async def test_hearths_own_labels_are_listed_but_never_touched(core: HomeAssista
 
     listed = await d.dispatch("labels.list", {})
     ours = [row for row in listed if row["hearth"]]
-    assert {row["name"] for row in ours} == {"Hearth: tile", "Hearth: read only", "Hearth: setting", "Hearth: diagnostic", "Hearth: hide"}
+    # All six, `Hearth: scene` included (#617): the flag says what the guard below refuses.
+    assert {row["name"] for row in ours} == set(ALL_LABELS.values())
+    assert "Hearth: scene" in {row["name"] for row in ours}
 
     hide = next(row for row in ours if row["name"] == "Hearth: hide")
     for method, params in [
@@ -80,6 +82,69 @@ async def test_a_renamed_hearth_label_is_still_refused(core: HomeAssistant) -> N
     with pytest.raises(RpcError) as ei:
         await d.dispatch("labels.delete", {"label_id": hide["label_id"]})
     assert ei.value.code == "method_not_allowed"
+
+
+async def test_hearth_scene_is_refused_like_the_presentation_labels(core: HomeAssistant) -> None:
+    """`Hearth: scene` marks the scripts whose contents are checked each time they run (AgDR-0044).
+
+    It is not a presentation role, so `role_of` does not know it, and the guard used to ask `role_of`.
+    A model with `labels.manage` could then take the label off a scene, or delete it, and the run-time
+    scan stopped applying to every scene it marked (#617). The ordinary label is the control: the same
+    dispatcher, the same calls, and they still work.
+    """
+    await async_ensure_labels(core)
+    marked = _entity(core, "script", "evening", expose=False)
+    other = _entity(core, "script", "morning", expose=False)
+    await async_mark_hearth_scene(core, marked, True)
+    assert is_hearth_scene(core, marked)
+    d = build_dispatcher(core, CAPS)
+    scene = next(row for row in await d.dispatch("labels.list", {}) if row["name"] == "Hearth: scene")
+    assert scene["hearth"] is True
+
+    for method, params in [
+        ("labels.update", {"label_id": scene["label_id"], "name": "Not a scene"}),
+        ("labels.delete", {"label_id": scene["label_id"]}),
+        ("labels.assign", {"label_id": scene["label_id"], "entity_ids": [marked], "mode": "remove"}),
+        ("labels.assign", {"label_id": scene["label_id"], "entity_ids": [other]}),
+    ]:
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch(method, params)
+        assert ei.value.code == "method_not_allowed", method
+        assert "Hearth: scene" in ei.value.message
+    # ...and nothing happened.
+    assert lr.async_get(core).async_get_label(scene["label_id"]).name == "Hearth: scene"
+    assert is_hearth_scene(core, marked)
+    assert not is_hearth_scene(core, other)
+
+    # The control: an ordinary label goes through every one of those calls.
+    made = await d.dispatch("labels.create", {"name": "Evenings"})
+    assert made["hearth"] is False
+    assert (await d.dispatch("labels.assign", {"label_id": made["label_id"], "entity_ids": [other]}))["changed"] == [other]
+    assert (await d.dispatch("labels.assign", {"label_id": made["label_id"], "entity_ids": [other], "mode": "remove"}))["changed"] == [other]
+    assert (await d.dispatch("labels.update", {"label_id": made["label_id"], "name": "Nights"}))["name"] == "Nights"
+    assert (await d.dispatch("labels.delete", {"label_id": made["label_id"]}))["removed_from"] == []
+    assert lr.async_get(core).async_get_label(made["label_id"]) is None
+
+
+async def test_a_renamed_hearth_scene_label_is_still_refused(core: HomeAssistant) -> None:
+    """Resolved by stored id, as a renamed presentation label is. The next test is the by-name half."""
+    await async_ensure_labels(core)
+    d = build_dispatcher(core, CAPS)
+    scene = next(row for row in await d.dispatch("labels.list", {}) if row["name"] == "Hearth: scene")
+    lr.async_get(core).async_update(scene["label_id"], name="Something else")
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("labels.delete", {"label_id": scene["label_id"]})
+    assert ei.value.code == "method_not_allowed"
+
+
+async def test_an_owner_made_hearth_scene_label_is_refused_by_name(core: HomeAssistant) -> None:
+    """No stored ids at all (the store never ran), so only the name can say it is Hearth's."""
+    label = lr.async_get(core).async_create("Hearth: scene")
+    d = build_dispatcher(core, CAPS)
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("labels.delete", {"label_id": label.label_id})
+    assert ei.value.code == "method_not_allowed"
+    assert lr.async_get(core).async_get_label(label.label_id) is not None
 
 
 @pytest.mark.parametrize("domain", ["lock", "camera", "device_tracker", "person", "image", "image_processing", "alarm_control_panel"])

@@ -66,6 +66,7 @@ STORAGE_VERSION = 1
 DATA_LABEL_IDS = f"{DOMAIN}_label_ids"
 
 _NAMES: dict[str, str] = {normalize_name(name): role for role, name in ROLES.items()}
+_ALL_NAMES: dict[str, str] = {normalize_name(name): role for role, name in ALL_LABELS.items()}
 
 # One `registry.changed` for a burst: deleting a label touches every entity that had it.
 DEBOUNCE_S = 1.0
@@ -133,6 +134,22 @@ def role_of(hass: HomeAssistant, label_id: str) -> str | None:
             return role if role in ROLES else None
     label = lr.async_get(hass).async_get_label(label_id)
     return _NAMES.get(label.normalized_name) if label is not None else None
+
+
+@callback
+def hearth_label_of(hass: HomeAssistant, label_id: str) -> str | None:
+    """Which of Hearth's own labels a label id is, routine labels included, or None.
+
+    `role_of` answers for presentation roles only, because what it feeds is `hearth_labels`. A guard
+    on who may change a Hearth label needs every one of them: `Hearth: scene` decides which scripts
+    are checked when they run, so a model that could strip or delete it could switch that off (#617).
+    Resolved by stored id and by name, as `role_of` is, so renaming one out of the way does not work.
+    """
+    for role, stored_id in _stored(hass).items():
+        if stored_id == label_id:
+            return role if role in ALL_LABELS else None
+    label = lr.async_get(hass).async_get_label(label_id)
+    return _ALL_NAMES.get(label.normalized_name) if label is not None else None
 
 
 @callback
