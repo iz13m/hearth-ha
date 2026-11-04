@@ -93,12 +93,20 @@ def _targets(hass: HomeAssistant, params: dict[str, Any]) -> list[str]:
         if domain in OFF_LIMITS:
             raise RpcError("not_found", f"unknown entity {entity_id}")
         ent = ent_reg.async_get(entity_id)
-        if ent is None:
-            raise RpcError("not_found", f"{entity_id} is not in the entity registry, so it cannot be labelled")
+        # What the model may not see is refused in an unknown id's words *before* the registry reason
+        # below, which would otherwise tell it which ids exist (#651). No state comes first, and for
+        # every domain: the three own lists are built from states, so a registry-disabled automation,
+        # script or scene is on none of them. With no registry entry, `visible()` would also pass a
+        # default-exposed domain such as `light.ghost`, and Home Assistant's exposure lookup writes a
+        # store key for an id it has not seen.
+        if hass.states.get(entity_id) is None:
+            raise RpcError("not_found", f"unknown entity {entity_id}")
         # Exposure is the boundary everywhere else, and it is the boundary here — except for the
         # three lists the model reaches through its own tools, which Assist never exposes.
         if domain not in OWN_LIST_DOMAINS and not visible(hass, entity_id, ent):
             raise RpcError("not_found", f"unknown entity {entity_id}")
+        if ent is None:
+            raise RpcError("not_found", f"{entity_id} is not in the entity registry, so it cannot be labelled")
         out.append(entity_id)
     return out
 

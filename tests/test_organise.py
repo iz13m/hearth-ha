@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import pytest
 
+from homeassistant.components.homeassistant.const import DATA_EXPOSED_ENTITIES
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import category_registry as cr, entity_registry as er, label_registry as lr
 
+from custom_components.hearth_ai.handlers import registry
 from custom_components.hearth_ai.labels import ALL_LABELS, async_ensure_labels, async_mark_hearth_scene, is_hearth_scene
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
@@ -169,12 +171,100 @@ async def test_an_unexposed_entity_cannot_be_labelled(core: HomeAssistant) -> No
     assert ei.value.code == "not_found"
 
 
-async def test_automations_can_be_labelled_though_assist_never_shares_them(core: HomeAssistant) -> None:
-    """The model reaches automations through its own list, so exposure is the wrong gate for them."""
-    automation = _entity(core, "automation", "hall_at_sunset", expose=False)
+async def test_an_entity_kept_from_the_model_is_refused_in_a_ghosts_words(core: HomeAssistant) -> None:
+    """#651: an id the model may not see is refused exactly as one that does not exist.
+
+    The registry reason used to come first, so a ghost was told it "is not in the entity registry"
+    while a registered entity the owner kept back got `unknown entity`: the second answer meant
+    "this exists". Each id below is compared with `sensor.ghost`, which has nothing at all, once the
+    ids are masked:
+    - `sensor.boiler_pressure` is registered and has a state, but is not exposed.
+    - `light.ghost` has no state and no registry entry, but its domain is exposed by default, so
+      `visible()` alone passes it.
+    - `sensor.removed` is marked exposed in the store, with no state and no registry entry, as a
+      YAML entity that has since been removed is.
+    No refusal leaves a new key in the exposure store.
+    """
+    kept = _entity(core, "sensor", "boiler_pressure", expose=False)
+    async_expose_entity(core, "conversation", "sensor.removed", True)
+    d = build_dispatcher(core, CAPS)
+    made = await d.dispatch("labels.create", {"name": "Plumbing"})
+    store = core.data[DATA_EXPOSED_ENTITIES].entities
+    before = set(store)
+
+    async def refusal(entity_id: str) -> tuple[str, str]:
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch("labels.assign", {"label_id": made["label_id"], "entity_ids": [entity_id]})
+        return ei.value.code, ei.value.message.replace(entity_id, "<id>")
+
+    ghost = await refusal("sensor.ghost")
+    assert ghost[0] == "not_found"
+    assert {i: await refusal(i) for i in (kept, "light.ghost", "sensor.removed")} == {
+        i: ghost for i in (kept, "light.ghost", "sensor.removed")
+    }
+    assert set(store) == before
+    assert lr.async_get(core).async_get_label(made["label_id"]) is not None
+    assert er.async_get(core).async_get(kept).labels == set()
+
+
+async def test_a_visible_entity_with_no_registry_entry_gets_the_registry_reason(core: HomeAssistant) -> None:
+    """#651's control: the registry reason is still given, to an entity the model can already see."""
+    core.states.async_set("sensor.yaml_only", "1")
+    async_expose_entity(core, "conversation", "sensor.yaml_only", True)
+    d = build_dispatcher(core, CAPS)
+    made = await d.dispatch("labels.create", {"name": "Garden"})
+
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("labels.assign", {"label_id": made["label_id"], "entity_ids": ["sensor.yaml_only"]})
+    assert (ei.value.code, ei.value.message) == (
+        "not_found",
+        "sensor.yaml_only is not in the entity registry, so it cannot be labelled",
+    )
+
+
+@pytest.mark.parametrize("domain", ["automation", "script", "scene"])
+async def test_a_disabled_routine_is_refused_in_a_ghosts_words(core: HomeAssistant, domain: str) -> None:
+    """#651: the three own lists are built from states, and a registry-disabled entry has none.
+
+    So none of them names a disabled automation, script or scene. Labelling one, while a ghost in
+    the same domain got the registry reason, told the model which disabled ids exist. It is refused
+    in the ghost's words once the ids are masked, and gains no label. The control is the enabled
+    automation with no exposure in the row below, which can still be labelled.
+    """
+    reg = er.async_get(core)
+    disabled = reg.async_get_or_create(
+        domain, "demo", "old", suggested_object_id="old", disabled_by=er.RegistryEntryDisabler.USER
+    ).entity_id
+    assert core.states.get(disabled) is None
+    d = build_dispatcher(core, CAPS)
+    made = await d.dispatch("labels.create", {"name": "Archive"})
+
+    async def refusal(entity_id: str) -> tuple[str, str]:
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch("labels.assign", {"label_id": made["label_id"], "entity_ids": [entity_id]})
+        return ei.value.code, ei.value.message.replace(entity_id, "<id>")
+
+    ghost = await refusal(f"{domain}.ghost")
+    assert ghost[0] == "not_found"
+    assert await refusal(disabled) == ghost
+    assert reg.async_get(disabled).labels == set()
+
+
+@pytest.mark.parametrize("domain", ["automation", "script", "scene"])
+async def test_routines_can_be_labelled_though_assist_never_shares_them(core: HomeAssistant, domain: str) -> None:
+    """The model reaches these through its own lists, so exposure is the wrong gate for them.
+
+    Each has a state and is explicitly not exposed, which is asserted: Home Assistant exposes
+    `scene` by default, so leaving exposure unset would let `visible()` pass a scene with no
+    exemption at all. This is the positive control for every domain in `OWN_LIST_DOMAINS`, so
+    narrowing the `visible()` exemption to fewer domains goes red.
+    """
+    routine = _entity(core, domain, "hall_at_sunset", expose=False)
+    async_expose_entity(core, "conversation", routine, False)
+    assert not registry._exposed(core, routine)
     d = build_dispatcher(core, CAPS)
     made = await d.dispatch("labels.create", {"name": "Evening"})
-    assert (await d.dispatch("labels.assign", {"label_id": made["label_id"], "entity_ids": [automation]}))["changed"] == [automation]
+    assert (await d.dispatch("labels.assign", {"label_id": made["label_id"], "entity_ids": [routine]}))["changed"] == [routine]
 
 
 async def test_deleting_a_label_says_what_it_came_off(core: HomeAssistant) -> None:
