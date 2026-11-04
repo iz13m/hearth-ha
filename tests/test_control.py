@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_mock_service
 
-from custom_components.hearth_ai.handlers import control
+from custom_components.hearth_ai.handlers import control, registry
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 TEST = "input_boolean.test"
@@ -87,20 +87,36 @@ async def test_an_exposed_image_processing_entity_cannot_be_called(core: HomeAss
     assert core.states.get("image_processing.driveway").state == "unknown"
 
 
+def in_unknown_ids_words(refused: RpcError, refused_id: str, unknown: RpcError, unknown_id: str) -> bool:
+    """The refusal reads exactly as the one for an id that does not exist, once each id is masked."""
+    return (refused.code, refused.message.replace(refused_id, "<id>")) == (
+        unknown.code,
+        unknown.message.replace(unknown_id, "<id>"),
+    )
+
+
 async def test_requires_a_real_exposed_entity_and_service(core: HomeAssistant) -> None:
+    """#648: an unexposed entity is refused in an unknown id's words, so the model cannot tell it exists.
+
+    The unknown-id refusal is taken from the handler, not written here, so the row follows that
+    message if it changes. Nothing is called, and the same entity exposed is the control.
+    """
     d = build_dispatcher(core)
     with pytest.raises(RpcError) as ei:
         await d.dispatch("devices.call", {"domain": "input_boolean", "service": "nope", "entity_id": [TEST]})
     assert ei.value.code == "not_found"
-    with pytest.raises(RpcError) as ei:
+    with pytest.raises(RpcError) as ghost:
         await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_on", "entity_id": ["input_boolean.ghost"]})
-    assert ei.value.code == "not_found"
+    assert ghost.value.code == "not_found"
     async_expose_entity(core, "conversation", TEST, False)
+    calls = async_mock_service(core, "input_boolean", "turn_on")
     with pytest.raises(RpcError) as ei:
         await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_on", "entity_id": [TEST]})
-    assert ei.value.code == "not_found"
-    assert "exposed" in ei.value.message
+    assert in_unknown_ids_words(ei.value, TEST, ghost.value, "input_boolean.ghost"), ei.value.message
+    assert calls == []
     async_expose_entity(core, "conversation", TEST, True)
+    await d.dispatch("devices.call", {"domain": "input_boolean", "service": "turn_on", "entity_id": [TEST]})
+    assert [c.data["entity_id"] for c in calls] == [[TEST]]
 
 
 @pytest.mark.parametrize(
@@ -140,6 +156,34 @@ async def test_a_hidden_or_disabled_entity_is_not_operated_even_when_exposed(cor
 
     await call("switch.control")
     assert [c.data["entity_id"] for c in calls] == [["switch.control"]]
+
+
+async def test_an_exposed_entity_in_a_hidden_domain_is_refused_by_the_policy_first(core: HomeAssistant) -> None:
+    """`image` is in `HIDDEN_DOMAINS`, and since #566 also in `REFERENCEABLE_DENIED_DOMAINS`.
+
+    So the action policy refuses it before `visible()` is asked, in the policy's words, and those
+    words name only the domain the caller sent. `visible()`'s off-limits clause cannot be reached
+    from `devices.call` at all: every `OFF_LIMITS` domain is referenceable-denied. That clause is
+    pinned on the read path, in `test_visibility.py`. The entity has a state and is exposed, which
+    is asserted, so the refusal cannot be the exposure clause either.
+    """
+    core.states.async_set("image.doorbell", "2026-10-14T00:00:00+00:00")
+    async_expose_entity(core, "conversation", "image.doorbell", True)
+    assert registry._exposed(core, "image.doorbell")
+    calls = async_mock_service(core, "image", "snapshot")
+    d = build_dispatcher(core)
+
+    def call(entity_id: str):
+        return d.dispatch("devices.call", {"domain": "image", "service": "snapshot", "entity_id": [entity_id]})
+
+    for entity_id in ("image.doorbell", "image.ghost"):
+        with pytest.raises(RpcError) as ei:
+            await call(entity_id)
+        assert (ei.value.code, ei.value.message) == (
+            "method_not_allowed",
+            f"{entity_id}: entities in image can never be controlled",
+        )
+    assert calls == []
 
 
 async def test_data_cannot_widen_the_target(core: HomeAssistant) -> None:
@@ -204,15 +248,23 @@ async def test_running_a_routine_requires_exposure(core: HomeAssistant) -> None:
     # house, and a script performs whatever its author wrote, locks included.
     assert row_can_run(await d.dispatch("scripts.list", {}), script["entity_id"]) is False
 
+    # #648: refused in the words an unknown scene or script gets, and nothing runs. `scenes.list` and
+    # `scripts.list` already name these, so this discloses nothing; it keeps one refusal sentence.
     for method, entity_id in [("scenes.activate", scene["entity_id"]), ("scripts.run", script["entity_id"])]:
+        domain = entity_id.split(".")[0]
+        with pytest.raises(RpcError) as ghost:
+            await d.dispatch(method, {"entity_id": f"{domain}.ghost"})
         async_expose_entity(core, "conversation", entity_id, False)
         with pytest.raises(RpcError) as ei:
             await d.dispatch(method, {"entity_id": entity_id})
-        assert ei.value.code == "not_found"
-        assert "exposed" in ei.value.message
+        assert in_unknown_ids_words(ei.value, entity_id, ghost.value, f"{domain}.ghost"), ei.value.message
+        await core.async_block_till_done()
+        assert core.states.get(TEST).state == "off"
         async_expose_entity(core, "conversation", entity_id, True)
         await d.dispatch(method, {"entity_id": entity_id})
         await core.async_block_till_done()
+        assert core.states.get(TEST).state == "on"
+        await core.services.async_call("input_boolean", "turn_off", {"entity_id": TEST}, blocking=True)
 
 
 async def test_refuses_to_activate_a_scene_that_sets_a_denied_entity(core: HomeAssistant) -> None:

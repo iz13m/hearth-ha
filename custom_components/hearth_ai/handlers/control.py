@@ -114,11 +114,12 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
     for entity_id in raw_ids:
         if hass.states.get(entity_id) is None:
             raise RpcError("not_found", f"unknown entity {entity_id}")
-        if not _exposed(hass, entity_id):
-            raise RpcError("not_found", f"{entity_id} is not exposed to Assist")
         # The read rule, so the model cannot operate what `states.get` would not show it (#642): an
-        # entity the registry hid or disabled is refused even when the owner exposed it, in the words
-        # an unknown id gets. One refused id refuses the whole call, before anything is sent.
+        # entity in `HIDDEN_DOMAINS`, one the owner did not expose, or one the registry hid or disabled
+        # is refused in the words an unknown id gets, so the model cannot tell which ids exist but are
+        # kept from it (#648).
+        # `visible()` holds the exposure clause, so it is not checked again here (#259). One refused
+        # id refuses the whole call, before anything is sent.
         if not visible(hass, entity_id, ent_reg.async_get(entity_id)):
             raise RpcError("not_found", f"unknown entity {entity_id}")
 
@@ -149,7 +150,7 @@ async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_doma
     # service call. `devices_call` has always checked this; running a scene or script did not, which
     # made activation the one way to reach an entity the owner kept out of Assist.
     if not _exposed(hass, entity_id):
-        raise RpcError("not_found", f"{entity_id} is not exposed to Assist")
+        raise RpcError("not_found", f"unknown entity {entity_id}")
     try:
         async with asyncio.timeout(CALL_TIMEOUT_S):
             await hass.services.async_call(expected_domain, "turn_on", {"entity_id": entity_id}, blocking=True)
