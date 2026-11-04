@@ -140,15 +140,14 @@ def visible(hass: HomeAssistant, entity_id: str, ent: Any, *, registry: bool = T
     Three clauses: the domain is not in `OFF_LIMITS`, the registry has not hidden or disabled it,
     and the owner exposed it to Assist. `entities.list` (poll), the state subscriber (push) and the
     label targets in `organise.py` all call this, so push and poll cannot disagree: there is one copy
-    of the rule. `tests/test_visibility.py` goes red if one of these readers, or the two below, stops
-    calling it; a new reader needs its own row there.
+    of the rule. `states.history` calls it too (#642). `tests/test_visibility.py` goes red if one of
+    these readers, or the one below, stops calling it; a new reader needs its own row there.
 
     `ent=None` skips the middle clause as well, so a reader that wants it must look the entry up
     and pass it; `registry=True` alone does not.
 
-    `registry=False` drops the middle clause, and `ent` is then not read. Two readers pass it:
-    `states.get`, and `states.history`, which AgDR-0036 gave `states.get`'s gate. Each says why at its
-    call.
+    `registry=False` drops the middle clause, and `ent` is then not read. One reader passes it,
+    `states.get`, and says why at its call.
     """
     if entity_id.split(".", 1)[0] in OFF_LIMITS:
         return False

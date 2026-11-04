@@ -16,6 +16,7 @@ from homeassistant.components.homeassistant.exposed_entities import async_expose
 from homeassistant.components.recorder.models.statistics import StatisticMeanType
 from homeassistant.components.recorder.statistics import async_import_statistics
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.hearth_ai.handlers import history
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
@@ -210,6 +211,38 @@ async def test_unexposed_and_unknown_are_refused_the_same_way(recorder_mock, cor
         await d.dispatch("states.history", {"entity_id": "sensor.no_such_thing", "hours": 24})
     assert unexposed.value.code == unknown.value.code == "not_found"
     assert unexposed.value.message.split()[:-1] == unknown.value.message.split()[:-1]
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [{"hidden_by": er.RegistryEntryHider.USER}, {"disabled_by": er.RegistryEntryDisabler.USER}],
+    ids=["hidden", "disabled"],
+)
+async def test_hidden_and_disabled_entries_are_refused_without_a_query(
+    recorder_mock, core: HomeAssistant, monkeypatch, flag: dict
+) -> None:
+    """AGENTS.md's invariant 1: hidden and disabled entries are not readable as history (#642).
+
+    Exposed, recorded and in the registry, beside a control that differs only in the flag and reads.
+    Home Assistant drops a disabled entity's state, so it is set by hand, as `test_visibility.py` does.
+    """
+    reg = er.async_get(core)
+    for object_id, extra in (("flagged", flag), ("control", {})):
+        reg.async_get_or_create("sensor", "hearth_test", object_id, suggested_object_id=object_id, **extra)
+        _expose(core, f"sensor.{object_id}")
+        await _record(core, f"sensor.{object_id}", ["20.0"])
+
+    d = build_dispatcher(core)
+    res = await d.dispatch("states.history", {"entity_id": "sensor.control", "hours": 24})
+    assert [p["state"] for p in res["points"]] == ["20.0"]
+
+    monkeypatch.setattr(history, "_read", lambda *a, **k: pytest.fail("the database was queried"))
+    with pytest.raises(RpcError) as flagged:
+        await d.dispatch("states.history", {"entity_id": "sensor.flagged", "hours": 24})
+    with pytest.raises(RpcError) as unknown:
+        await d.dispatch("states.history", {"entity_id": "sensor.no_such_thing", "hours": 24})
+    assert flagged.value.code == unknown.value.code == "not_found"
+    assert flagged.value.message.split()[:-1] == unknown.value.message.split()[:-1]
 
 
 async def test_an_external_statistic_is_not_an_entity(recorder_mock, core: HomeAssistant) -> None:

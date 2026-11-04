@@ -39,10 +39,10 @@ CORPUS = (SHOWN, HIDDEN, DISABLED, UNEXPOSED, CAMERA, ALARM)
 
 # The whole rule: only the control passes.
 FULL = {SHOWN}
-# `registry=False`: the hidden and the disabled switch pass too. This is what `states.get` and
-# `states.history` do today, pinned so the refactor changes nothing; it is not the rule they should
-# follow. AGENTS.md's invariant 1 says hidden and disabled entries are not readable as history, and
-# #642 fixes that gap for history. When it is fixed, those readers' rows below move to `FULL`.
+# `registry=False`: the hidden and the disabled switch pass too. This is what `states.get` does today,
+# pinned so the refactor changes nothing; it is not the rule. #642 ruled that `states.get` follows the
+# whole rule, and a later change moves its rows to `FULL`. `states.history` used to answer this set
+# too, against AGENTS.md's invariant 1, and follows the whole rule since #642.
 NO_REGISTRY = {SHOWN, HIDDEN, DISABLED}
 
 
@@ -131,7 +131,7 @@ async def test_every_reader_answers_the_rule_it_names(core: HomeAssistant) -> No
         "labels": FULL,
         # Current behaviour, not the rule: see `NO_REGISTRY`.
         "states.get": NO_REGISTRY,
-        "states.history": NO_REGISTRY,
+        "states.history": FULL,
     }
 
 
@@ -165,7 +165,7 @@ async def test_every_reader_asks_visible(core: HomeAssistant, monkeypatch: pytes
         "push": set(),
         "labels": set(),
         "states.get": NO_REGISTRY - {SHOWN},
-        "states.history": NO_REGISTRY - {SHOWN},
+        "states.history": set(),
     }
 
 

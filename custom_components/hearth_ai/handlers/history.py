@@ -35,6 +35,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from ..rpc import Dispatcher, RpcError
@@ -78,10 +79,10 @@ def _entity(hass: HomeAssistant, entity_id: str) -> Any:
     if entity_id.split(".", 1)[0] in OFF_LIMITS:
         raise RpcError("not_found", f"unknown entity {entity_id}")
     state = hass.states.get(entity_id)
-    # AgDR-0036 gave history "the same gate `states.get` uses" (since #603 both refuse `OFF_LIMITS`), so
-    # it takes `registry=False` with that gate: inherited, not chosen. AGENTS.md's invariant 1 says hidden
-    # and disabled entries are not readable as history, which this does not meet; #642 fixes it.
-    if state is None or not visible(hass, entity_id, None, registry=False):
+    # The whole rule, registry clause included: AGENTS.md's invariant 1 says hidden and disabled
+    # entries are not readable as history (#642). AgDR-0036 gave history `states.get`'s gate, which
+    # skips that clause. `states.get` is ruled to apply it too, in a later change.
+    if state is None or not visible(hass, entity_id, er.async_get(hass).async_get(entity_id)):
         raise RpcError("not_found", f"unknown entity {entity_id}")
     return state
 
