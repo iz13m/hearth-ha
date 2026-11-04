@@ -128,8 +128,8 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "zwave_js.set_config_parameter",
         "zwave_js.bulk_set_partial_config_parameters",
         # #581 option A, found by Security from #581 option B's draft: services Home Assistant
-        # registers on the `lock` platform itself (`entity_domain=LOCK_DOMAIN`, or
-        # `async_register_entity_service` in an integration's `lock.py`). Named by a `lock.*` entity
+        # registers on the `lock` platform itself (`entity_domain=LOCK_DOMAIN`, or an entity service
+        # registered in an integration's `lock.py`). Named by a `lock.*` entity
         # they are already refused by the entity-domain check, but HA resolves a `device_id`,
         # `area_id`, `floor_id` or `label_id` target, or `entity_id: all`, to the locks behind it
         # (`helpers/service.py`, `referenced | indirectly_referenced`), and none of those names a
