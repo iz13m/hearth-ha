@@ -130,11 +130,29 @@ def _category(ent: Any) -> str | None:
     return value if value in ("config", "diagnostic") else None
 
 
-def visible(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
-    """The same visibility rules `entities.list` applies, so push and poll cannot disagree."""
+def visible(hass: HomeAssistant, entity_id: str, ent: Any, *, registry: bool = True) -> bool:
+    """Whether the model may see this entity: the one rule the readers named below apply (#259).
+
+    Not every list of the home's entities applies it. `scripts.list` and `scenes.list` list their own
+    domain whether or not the owner exposed an entry, so that it can be found and edited, and say so
+    with `can_run`.
+
+    Three clauses: the domain is not in `OFF_LIMITS`, the registry has not hidden or disabled it,
+    and the owner exposed it to Assist. `entities.list` (poll), the state subscriber (push) and the
+    label targets in `organise.py` all call this, so push and poll cannot disagree: there is one copy
+    of the rule. `tests/test_visibility.py` goes red if one of these readers, or the two below, stops
+    calling it; a new reader needs its own row there.
+
+    `ent=None` skips the middle clause as well, so a reader that wants it must look the entry up
+    and pass it; `registry=True` alone does not.
+
+    `registry=False` drops the middle clause, and `ent` is then not read. Two readers pass it:
+    `states.get`, and `states.history`, which AgDR-0036 gave `states.get`'s gate. Each says why at its
+    call.
+    """
     if entity_id.split(".", 1)[0] in OFF_LIMITS:
         return False
-    if ent is not None and (ent.hidden_by or ent.disabled_by):
+    if registry and ent is not None and (ent.hidden_by or ent.disabled_by):
         return False
     return _exposed(hass, entity_id)
 
@@ -201,14 +219,10 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         # last page, so the result shape stays as it was.
         if after is not None and state.entity_id <= after:
             continue
-        if state.domain in OFF_LIMITS:
-            continue
         if domain and state.domain != domain:
             continue
         ent = ent_reg.async_get(state.entity_id)
-        if ent is not None and (ent.hidden_by or ent.disabled_by):
-            continue
-        if not _exposed(hass, state.entity_id):
+        if not visible(hass, state.entity_id, ent):
             continue
         entity_area = _entity_area(ent, dev_reg)
         if area_id and entity_area != area_id:
@@ -224,11 +238,15 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
 
 async def states_get(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
     entity_id = require_str(params, "entity_id")
-    domain = entity_id.split(".", 1)[0]
-    if domain in OFF_LIMITS:
+    if entity_id.split(".", 1)[0] in OFF_LIMITS:
+        # Only the message differs here; `visible()` below refuses these domains too.
         raise RpcError("not_found", "entity not available")
     state = hass.states.get(entity_id)
-    if state is None or not _exposed(hass, entity_id):
+    # `registry=False`: this read has never applied the registry's hidden and disabled clause. It has
+    # been so since the first commit, and nothing records it as a choice. #642 ruled that it should,
+    # and a later change applies it. Home Assistant drops a disabled entity's state, so in practice
+    # only `hidden_by` is reachable.
+    if state is None or not visible(hass, entity_id, None, registry=False):
         raise RpcError("not_found", f"unknown entity {entity_id}")
     return {
         "entity_id": state.entity_id,

@@ -39,7 +39,7 @@ from homeassistant.util import dt as dt_util
 
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .registry import OFF_LIMITS, _exposed
+from .registry import OFF_LIMITS, visible
 
 DEFAULT_POINTS = 500
 MAX_POINTS = 2000
@@ -78,7 +78,10 @@ def _entity(hass: HomeAssistant, entity_id: str) -> Any:
     if entity_id.split(".", 1)[0] in OFF_LIMITS:
         raise RpcError("not_found", f"unknown entity {entity_id}")
     state = hass.states.get(entity_id)
-    if state is None or not _exposed(hass, entity_id):
+    # AgDR-0036 gave history "the same gate `states.get` uses" (since #603 both refuse `OFF_LIMITS`), so
+    # it takes `registry=False` with that gate: inherited, not chosen. AGENTS.md's invariant 1 says hidden
+    # and disabled entries are not readable as history, which this does not meet; #642 fixes it.
+    if state is None or not visible(hass, entity_id, None, registry=False):
         raise RpcError("not_found", f"unknown entity {entity_id}")
     return state
 
