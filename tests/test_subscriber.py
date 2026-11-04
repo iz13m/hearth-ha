@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import HomeAssistant
 
@@ -145,3 +147,32 @@ async def test_a_failing_send_does_not_break_the_subscription(core: HomeAssistan
         s.stop()
 
     assert calls == 2
+
+
+@pytest.mark.parametrize(("entity_id", "state"), [("alarm_control_panel.house", "armed_away"), ("siren.hall", "on")])
+async def test_never_pushes_an_exposed_alarm_panel_or_siren(core: HomeAssistant, entity_id: str, state: str) -> None:
+    """#603: exposing one in Home Assistant's own UI must not put it on the push, as it does not the poll.
+
+    A fan exposed the same way changes in the same window and must be pushed: that is what shows the
+    alarm is dropped for its domain, not because the fixture pushes nothing.
+    """
+    sent: list[list[dict]] = []
+
+    async def send(batch: list[dict]) -> None:
+        sent.append(batch)
+
+    control = "fan.landing"
+    for eid in (entity_id, control):
+        async_expose_entity(core, "conversation", eid, True)
+    s = StateSubscriber(core, send)
+    s.start()
+    try:
+        core.states.async_set(entity_id, state)
+        core.states.async_set(control, "on")
+        await _settle(core)
+    finally:
+        s.stop()
+
+    pushed = [e["entity_id"] for batch in sent for e in batch]
+    assert control in pushed
+    assert entity_id not in pushed

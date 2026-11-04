@@ -39,15 +39,18 @@ ATTRIBUTE_DENYLIST: frozenset[str] = frozenset(
 # a count of people at the camera (#566).
 HIDDEN_DOMAINS: frozenset[str] = frozenset({"camera", "device_tracker", "person", "image", "image_processing", "lock"})
 
-# Never shareable, and never readable in any form that shows a pattern over time. The union of two
-# lists that are nearly but not quite the same: `HIDDEN_DOMAINS` is what the read path hides and has
-# `image`; `DENIED_ENTITY_DOMAINS` is what the action policy refuses and has `alarm_control_panel`,
-# which `HIDDEN_DOMAINS` does not. Using only the first would let an admin share an alarm panel and
-# read whether the house is armed — or, through `states.history`, when it was armed and when it was
-# not, which is the same disclosure with dates on it.
+# Never shareable, never listed, never read, never pushed. The union of two lists that are nearly but
+# not quite the same: `HIDDEN_DOMAINS` has `image`; `DENIED_ENTITY_DOMAINS` is what the action policy
+# refuses and has `alarm_control_panel` and `siren`, which `HIDDEN_DOMAINS` does not. Using only the
+# first would let an admin share an alarm panel and read whether the house is armed — or, through
+# `states.history`, when it was armed and when it was not, which is the same disclosure with dates on
+# it. Sharing is not the only way in: an owner can expose an alarm panel in Home Assistant's own UI,
+# which never asks Hearth, so `visible`, `entities_list`, `states_get` and `services_list` filter on
+# this set too (#603). They filtered on `HIDDEN_DOMAINS` alone until then, so the model could read an
+# exposed alarm panel's state while its history was refused.
 #
-# Lives here rather than in `exposure.py`, where it started, because two handlers now depend on it
-# meaning exactly the same thing (AgDR-0036).
+# Lives here rather than in `exposure.py`, where it started, because every handler that reads or
+# lists entities depends on it meaning exactly the same thing (AgDR-0036).
 OFF_LIMITS: frozenset[str] = HIDDEN_DOMAINS | DENIED_ENTITY_DOMAINS
 
 MAX_ATTR_STR = 500
@@ -129,7 +132,7 @@ def _category(ent: Any) -> str | None:
 
 def visible(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
     """The same visibility rules `entities.list` applies, so push and poll cannot disagree."""
-    if entity_id.split(".", 1)[0] in HIDDEN_DOMAINS:
+    if entity_id.split(".", 1)[0] in OFF_LIMITS:
         return False
     if ent is not None and (ent.hidden_by or ent.disabled_by):
         return False
@@ -198,7 +201,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         # last page, so the result shape stays as it was.
         if after is not None and state.entity_id <= after:
             continue
-        if state.domain in HIDDEN_DOMAINS:
+        if state.domain in OFF_LIMITS:
             continue
         if domain and state.domain != domain:
             continue
@@ -222,7 +225,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
 async def states_get(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
     entity_id = require_str(params, "entity_id")
     domain = entity_id.split(".", 1)[0]
-    if domain in HIDDEN_DOMAINS:
+    if domain in OFF_LIMITS:
         raise RpcError("not_found", "entity not available")
     state = hass.states.get(entity_id)
     if state is None or not _exposed(hass, entity_id):
@@ -243,7 +246,7 @@ async def services_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
     for dom, services in sorted(descriptions.items()):
         if domain and dom != domain:
             continue
-        if dom in HIDDEN_DOMAINS:
+        if dom in OFF_LIMITS:
             continue
         for name, desc in sorted(services.items()):
             fields = desc.get("fields", {}) if isinstance(desc, dict) else {}

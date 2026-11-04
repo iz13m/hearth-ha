@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pytest_homeassistant_custom_component.common import async_mock_service
@@ -13,6 +14,7 @@ from homeassistant.components.homeassistant.exposed_entities import async_expose
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
+from custom_components.hearth_ai.handlers import registry
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 AUTOMATION = {
@@ -222,6 +224,62 @@ async def test_assist_exposure_is_honoured(core: HomeAssistant) -> None:
     assert ei.value.code == "not_found"
     async_expose_entity(core, "conversation", "input_boolean.test", True)
     assert (await d.dispatch("states.get", {"entity_id": "input_boolean.test"}))["state"] == "off"
+
+
+# An alarm panel and a siren are in `OFF_LIMITS` but not in `HIDDEN_DOMAINS`. Home Assistant's own UI
+# can expose either to Assist without asking Hearth's share tool, so exposure alone must not make them
+# readable (#603). Each case is set up beside a fan exposed the same way, which must come through: that
+# is what shows the refusal is the domain's and not a fixture that lists nothing.
+OFF_LIMITS_EXPOSED = [("alarm_control_panel.house", "armed_away"), ("siren.hall", "on")]
+CONTROL = "fan.landing"
+
+
+def _expose_beside_control(core: HomeAssistant, entity_id: str, state: str) -> None:
+    for eid, value in ((entity_id, state), (CONTROL, "on")):
+        core.states.async_set(eid, value)
+        async_expose_entity(core, "conversation", eid, True)
+
+
+@pytest.mark.parametrize(("entity_id", "state"), OFF_LIMITS_EXPOSED)
+async def test_an_exposed_alarm_panel_or_siren_is_not_listed(core: HomeAssistant, entity_id: str, state: str) -> None:
+    _expose_beside_control(core, entity_id, state)
+    d = build_dispatcher(core)
+    listed = {e["entity_id"] for e in await d.dispatch("entities.list", {})}
+    assert CONTROL in listed
+    assert entity_id not in listed
+    assert await d.dispatch("entities.list", {"domain": entity_id.split(".", 1)[0]}) == []
+
+
+@pytest.mark.parametrize(("entity_id", "state"), OFF_LIMITS_EXPOSED)
+async def test_an_exposed_alarm_panel_or_siren_cannot_be_read(core: HomeAssistant, entity_id: str, state: str) -> None:
+    _expose_beside_control(core, entity_id, state)
+    d = build_dispatcher(core)
+    assert (await d.dispatch("states.get", {"entity_id": CONTROL}))["state"] == "on"
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("states.get", {"entity_id": entity_id})
+    assert ei.value.code == "not_found"
+    # The domain refusal's own message, so this is the domain check answering and not exposure.
+    assert ei.value.message == "entity not available"
+
+
+@pytest.mark.parametrize(("entity_id", "state"), OFF_LIMITS_EXPOSED)
+async def test_alarm_and_siren_services_are_not_catalogued(
+    core: HomeAssistant, monkeypatch: pytest.MonkeyPatch, entity_id: str, state: str
+) -> None:
+    """One set across every read: listing a service the policy refuses only invites the call."""
+    domain = entity_id.split(".", 1)[0]
+
+    # A fixed catalogue rather than Home Assistant's own: loading the real `services.yaml` for these
+    # two domains validates a camera selector, which imports `turbojpeg`, which the pinned venv lacks.
+    # The filter is what is under test, not the loader.
+    async def descriptions(_hass: HomeAssistant) -> dict[str, Any]:
+        return {domain: {"turn_on": {}}, "fan": {"turn_on": {}}}
+
+    monkeypatch.setattr(registry, "async_get_all_descriptions", descriptions)
+    d = build_dispatcher(core)
+    assert "fan" in {s["domain"] for s in await d.dispatch("services.list", {})}
+    assert domain not in {s["domain"] for s in await d.dispatch("services.list", {})}
+    assert await d.dispatch("services.list", {"domain": domain}) == []
 
 
 async def test_entities_list_pages_by_keyset(core: HomeAssistant) -> None:
