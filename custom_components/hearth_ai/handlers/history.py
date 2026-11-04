@@ -80,8 +80,8 @@ def _entity(hass: HomeAssistant, entity_id: str) -> Any:
         raise RpcError("not_found", f"unknown entity {entity_id}")
     state = hass.states.get(entity_id)
     # The whole rule, registry clause included: AGENTS.md's invariant 1 says hidden and disabled
-    # entries are not readable as history (#642). AgDR-0036 gave history `states.get`'s gate, which
-    # skips that clause. `states.get` is ruled to apply it too, in a later change.
+    # entries are not readable as history (#642). `states.get` applies the same rule, so AgDR-0036's
+    # "the same gate `states.get` uses" holds again, widened by `OFF_LIMITS` above.
     if state is None or not visible(hass, entity_id, er.async_get(hass).async_get(entity_id)):
         raise RpcError("not_found", f"unknown entity {entity_id}")
     return state

@@ -13,7 +13,7 @@ from custom_components.hearth_ai.const import (
     CAPABILITY_FOR_METHOD,
     OPT_IN_CAPABILITIES,
 )
-from custom_components.hearth_ai.rpc import ALLOWED_METHODS, ERROR_CODES
+from custom_components.hearth_ai.rpc import ALLOWED_METHODS, ENTITY_ID, ENTITY_ID_PARAMS, ERROR_CODES
 
 SCHEMA = Path(__file__).resolve().parents[2] / "shared" / "schema" / "methods.json"
 
@@ -167,3 +167,53 @@ def test_switching_an_automation_is_a_write_and_not_a_new_capability() -> None:
     assert CAPABILITY_FOR_METHOD["automations.set_enabled"] == "automations.write"
     # Still never a way to run one: that is the line AgDR-0042 drew.
     assert "automations.trigger" not in ALLOWED_METHODS
+
+
+def _entity_id_paths(schema: dict, pattern: str) -> list[tuple[str, ...]]:
+    """Every path in one params schema whose value is the shared `EntityId`, found by its pattern.
+
+    Refuses a keyword it does not walk, so a schema reshaped with `$ref` or `prefixItems` is red here
+    rather than walked past.
+    """
+    walked = {"properties", "items", "anyOf", "oneOf", "allOf", "additionalProperties", "propertyNames"}
+    unwalked = {"$ref", "$defs", "definitions", "prefixItems", "patternProperties", "not", "if", "then", "else"}
+    out: list[tuple[str, ...]] = []
+
+    def walk(node: object, path: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        assert not (unwalked & node.keys()), (path, unwalked & node.keys())
+        if node.get("pattern") == pattern:
+            out.append(path)
+            return
+        for name, child in node.get("properties", {}).items():
+            walk(child, (*path, name))
+        for key in walked - {"properties"}:
+            child = node.get(key)
+            for c in child if isinstance(child, list) else [child]:
+                walk(c, (*path, "[]") if key == "items" else path)
+
+    walk(schema, ())
+    return out
+
+
+def test_entity_id_params_match_shared() -> None:
+    """The dispatcher checks the parameter the schema types as `EntityId`, for every method (#646).
+
+    Derived from the schema, not from a grep over spellings: two handlers take their ids under
+    `entity_ids`, and a check keyed on `entity_id` alone passed every row that named only that.
+    The dispatcher looks one top-level key up per method, so a deeper or a second path is red here.
+    """
+    data = _load()
+    pattern = data["methods"]["states.get"]["params"]["properties"]["entity_id"]["pattern"]
+    assert pattern == f"^{ENTITY_ID.pattern}$"
+    derived: dict[str, str] = {}
+    for method in data["hub_to_ha_allowlist"]:
+        paths = _entity_id_paths(data["methods"][method]["params"], pattern)
+        if not paths:
+            continue
+        assert len(paths) == 1 and paths[0][1:] in ((), ("[]",)), (method, paths)
+        derived[method] = paths[0][0]
+    # The control: the walk finds a single id and a list, under both spellings.
+    assert derived["states.get"] == "entity_id" and derived["entities.expose"] == "entity_ids"
+    assert derived == ENTITY_ID_PARAMS

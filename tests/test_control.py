@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import async_mock_service
 
 from custom_components.hearth_ai.handlers import control
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
@@ -99,6 +101,45 @@ async def test_requires_a_real_exposed_entity_and_service(core: HomeAssistant) -
     assert ei.value.code == "not_found"
     assert "exposed" in ei.value.message
     async_expose_entity(core, "conversation", TEST, True)
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [{"hidden_by": er.RegistryEntryHider.USER}, {"disabled_by": er.RegistryEntryDisabler.USER}],
+    ids=["hidden", "disabled"],
+)
+async def test_a_hidden_or_disabled_entity_is_not_operated_even_when_exposed(core: HomeAssistant, flag: dict) -> None:
+    """#642: `devices.call` refuses what `states.get` would not show, in the words an unknown id gets.
+
+    The flagged switch and the control differ only in the flag: both are in the registry, have a
+    state and are exposed to Assist. A call naming both is refused whole, with nothing sent, which is
+    the stated limit for a hub whose entity list is a poll behind: the control in that call does not
+    move either. Home Assistant drops a disabled entity's state, so it is set by hand.
+    """
+    reg = er.async_get(core)
+    for object_id, extra in (("flagged", flag), ("control", {})):
+        reg.async_get_or_create("switch", "hearth_test", object_id, suggested_object_id=object_id, **extra)
+        core.states.async_set(f"switch.{object_id}", "off")
+        async_expose_entity(core, "conversation", f"switch.{object_id}", True)
+    calls = async_mock_service(core, "switch", "turn_on")
+    d = build_dispatcher(core)
+
+    def call(*ids: str):
+        return d.dispatch("devices.call", {"domain": "switch", "service": "turn_on", "entity_id": list(ids)})
+
+    with pytest.raises(RpcError) as flagged:
+        await call("switch.flagged")
+    with pytest.raises(RpcError) as unknown:
+        await call("switch.no_such_thing")
+    assert (flagged.value.code, flagged.value.message) == ("not_found", "unknown entity switch.flagged")
+    assert unknown.value.message == "unknown entity switch.no_such_thing"
+    with pytest.raises(RpcError) as mixed:
+        await call("switch.control", "switch.flagged")
+    assert mixed.value.code == "not_found"
+    assert calls == []
+
+    await call("switch.control")
+    assert [c.data["entity_id"] for c in calls] == [["switch.control"]]
 
 
 async def test_data_cannot_widen_the_target(core: HomeAssistant) -> None:

@@ -25,7 +25,6 @@ Three rules make that safe to do from a phone:
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from homeassistant.components.homeassistant.exposed_entities import (
@@ -35,16 +34,13 @@ from homeassistant.components.homeassistant.exposed_entities import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from ..rpc import Dispatcher, RpcError
+from ..rpc import ENTITY_ID, Dispatcher, RpcError
 # `OFF_LIMITS` is shared with the history handler; it lives next to the domain lists it is built
 # from. Consulted here only when *adding*. See rule 3 in the module docstring.
 from .registry import ASSISTANT, OFF_LIMITS, _category, _device_name, _entity_area
 
 MAX_IDS = 100
 DEFAULT_LIMIT = 500
-
-# The hub validates this too; repeated here because both sides enforce, always (invariant 1).
-ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 
 # Why a change was refused, as a closed word the app renders in the household's language (#452).
 # `reason` stays beside it in English for the Hearth panel and for apps older than the code. Must
@@ -84,7 +80,9 @@ def _refusal(hass: HomeAssistant, entity_id: str, ent_reg: er.EntityRegistry, *,
     default. Refusing those here would have meant the devices Hearth most visibly *can* see were the
     ones this screen could neither list nor take back.
     """
-    if not ENTITY_ID_RE.match(entity_id):
+    # The dispatcher's canonical-form check (#646), made here per id so the rest of the batch still
+    # goes through. `fullmatch`: the old `match` with `$` let a trailing newline through.
+    if not ENTITY_ID.fullmatch(entity_id):
         return {"code": "not_entity", "reason": "not an entity id"}
     domain = entity_id.split(".", 1)[0]
     if expose and domain in OFF_LIMITS:

@@ -1,4 +1,4 @@
-"""One visibility rule, called by every read of the home (#259).
+"""One visibility rule, called by every read of the home (#259), and by `devices.call` (#642).
 
 `visible()` used to be one of three copies of the rule: `entities.list` repeated its clauses inline
 and `states.get` applied two of them. Its docstring promised that push and poll cannot disagree, and
@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from pytest_homeassistant_custom_component.common import async_mock_service
 
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import HomeAssistant
@@ -37,13 +38,10 @@ CAMERA = "camera.porch"
 ALARM = "alarm_control_panel.house"
 CORPUS = (SHOWN, HIDDEN, DISABLED, UNEXPOSED, CAMERA, ALARM)
 
-# The whole rule: only the control passes.
+# The whole rule: only the control passes. Every reader, and `devices.call`, answers this set. Before
+# #642, `states.get` and `states.history` also answered for the hidden and the disabled switch, and
+# `devices.call` operated them.
 FULL = {SHOWN}
-# `registry=False`: the hidden and the disabled switch pass too. This is what `states.get` does today,
-# pinned so the refactor changes nothing; it is not the rule. #642 ruled that `states.get` follows the
-# whole rule, and a later change moves its rows to `FULL`. `states.history` used to answer this set
-# too, against AGENTS.md's invariant 1, and follows the whole rule since #642.
-NO_REGISTRY = {SHOWN, HIDDEN, DISABLED}
 
 
 async def _corpus(hass: HomeAssistant) -> None:
@@ -71,8 +69,21 @@ async def _corpus(hass: HomeAssistant) -> None:
 
 
 async def _answers(hass: HomeAssistant) -> dict[str, set[str]]:
-    """The corpus ids each reader answers for, one set per reader."""
+    """The corpus ids each reader answers for, one set per reader, and the ids `devices.call` operated.
+
+    `devices.call` is read off the service's own calls, not off the absence of an error, so an id
+    counts only if the service really ran for it. The camera and the alarm panel are refused there by
+    the action policy (`method_not_allowed`) before visibility is asked; every other refusal is
+    `not_found`.
+    """
     d = build_dispatcher(hass)
+    turned_on = async_mock_service(hass, "switch", "turn_on")
+
+    async def call(entity_id: str) -> None:
+        try:
+            await d.dispatch("devices.call", {"domain": "switch", "service": "turn_on", "entity_id": [entity_id]})
+        except RpcError as e:
+            assert e.code == ("method_not_allowed" if entity_id in (CAMERA, ALARM) else "not_found"), (entity_id, e.code)
 
     async def get(entity_id: str) -> bool:
         try:
@@ -107,12 +118,15 @@ async def _answers(hass: HomeAssistant) -> dict[str, set[str]]:
         s.stop()
 
     listed = {e["entity_id"] for e in await d.dispatch("entities.list", {})}
+    for entity_id in CORPUS:
+        await call(entity_id)
     return {
         "entities.list": listed & set(CORPUS),
         "push": pushed & set(CORPUS),
         "labels": {i for i in CORPUS if not refuses(lambda i=i: organise._targets(hass, {"entity_ids": [i]}))},
         "states.get": {i for i in CORPUS if await get(i)},
         "states.history": {i for i in CORPUS if not refuses(lambda i=i: history._entity(hass, i))},
+        "devices.call": {i for c in turned_on for i in c.data["entity_id"]},
     }
 
 
@@ -123,15 +137,14 @@ async def test_every_reader_answers_the_rule_it_names(core: HomeAssistant) -> No
 
     # The rule itself, pinned literally, so a change to `visible()` is red here and not only agreed with.
     assert {i for i in CORPUS if registry.visible(core, i, ent_reg.async_get(i))} == FULL
-    assert {i for i in CORPUS if registry.visible(core, i, ent_reg.async_get(i), registry=False)} == NO_REGISTRY
 
     assert await _answers(core) == {
         "entities.list": FULL,
         "push": FULL,
         "labels": FULL,
-        # Current behaviour, not the rule: see `NO_REGISTRY`.
-        "states.get": NO_REGISTRY,
+        "states.get": FULL,
         "states.history": FULL,
+        "devices.call": FULL,
     }
 
 
@@ -140,15 +153,15 @@ async def test_every_reader_asks_visible(core: HomeAssistant, monkeypatch: pytes
 
     `visible()` is swapped, in every module that imported it, for one that also refuses the control.
     A reader that asks it stops answering for the control; one that decides for itself does not.
-    Scope: the five readers `_answers` calls. The swap reaches any module that imports `visible()`,
+    Scope: the five readers and `devices.call` that `_answers` calls. The swap reaches any module that imports `visible()`,
     but a new reader is only checked once it has a row in `_answers`, and one that never imports
     `visible()` is not found here at all.
     """
     await _corpus(core)
     real = registry.visible
 
-    def stricter(hass: HomeAssistant, entity_id: str, ent: Any, **kwargs: Any) -> bool:
-        return entity_id != SHOWN and real(hass, entity_id, ent, **kwargs)
+    def stricter(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
+        return entity_id != SHOWN and real(hass, entity_id, ent)
 
     holders = [
         m
@@ -156,7 +169,7 @@ async def test_every_reader_asks_visible(core: HomeAssistant, monkeypatch: pytes
         if name.startswith("custom_components.hearth_ai") and getattr(m, "visible", None) is real
     ]
     # The control for the discovery: it must find every module this file names, or the swap is partial.
-    assert {m.__name__.rsplit(".", 1)[-1] for m in holders} >= {"registry", "subscriber", "organise", "history"}
+    assert {m.__name__.rsplit(".", 1)[-1] for m in holders} >= {"registry", "subscriber", "organise", "history", "control"}
     for m in holders:
         monkeypatch.setattr(m, "visible", stricter)
 
@@ -164,8 +177,9 @@ async def test_every_reader_asks_visible(core: HomeAssistant, monkeypatch: pytes
         "entities.list": set(),
         "push": set(),
         "labels": set(),
-        "states.get": NO_REGISTRY - {SHOWN},
+        "states.get": set(),
         "states.history": set(),
+        "devices.call": set(),
     }
 
 

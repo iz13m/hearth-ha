@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 import logging
+import re
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -112,6 +113,37 @@ ERROR_CODES: frozenset[str] = frozenset(
 )
 
 
+# `EntityId` in packages/shared, which the hub validates every request against before sending it. Home
+# Assistant's state lookup falls back to `entity_id.lower()` and its registry and exposure lookups do
+# not, so an id in any other form finds a state with no registry entry and no exposure setting behind
+# it, and every check made from those passes (#646). The box therefore refuses it too, here, before
+# any handler looks it up. `fullmatch`: `$` would let a trailing newline through.
+ENTITY_ID = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
+
+# The one parameter of each method that the shared schema types as `EntityId`, a single id or a list
+# of them. tests/test_allowlist.py derives this from schema/methods.json and asserts the two are equal,
+# so a method that gains an entity-id parameter is red there until it is added here.
+ENTITY_ID_PARAMS: dict[str, str] = {
+    "access.operate": "entity_id",
+    "areas.assign": "entity_id",
+    "categories.assign": "entity_ids",
+    "devices.call": "entity_id",
+    "entities.expose": "entity_ids",
+    "labels.assign": "entity_ids",
+    "scenes.activate": "entity_id",
+    "scripts.run": "entity_id",
+    "states.get": "entity_id",
+    "states.history": "entity_id",
+    "vision.snapshot": "entity_id",
+    "vision.webrtc_config": "entity_id",
+    "vision.webrtc_offer": "entity_id",
+}
+# Methods whose handler makes the same check itself, per id, because refusing one id must not refuse
+# the batch: `entities.expose` answers `not_entity` for that id, a code the hub declares
+# (`EXPOSURE_REFUSAL_CODES`), and changes the rest. Its check runs before any lookup, as this one does.
+CHECKED_PER_ID: frozenset[str] = frozenset({"entities.expose"})
+
+
 class RpcError(Exception):
     """Error surfaced to the hub as an `err` frame."""
 
@@ -166,6 +198,12 @@ class Dispatcher:
             params = {}
         if not isinstance(params, dict):
             raise RpcError("invalid_params", "params must be an object")
+        if (key := ENTITY_ID_PARAMS.get(method)) is not None and method not in CHECKED_PER_ID:
+            value = params.get(key)
+            # A non-string is left to the handler, which refuses it as `invalid_params` as before.
+            for entity_id in value if isinstance(value, list) else [value]:
+                if isinstance(entity_id, str) and not ENTITY_ID.fullmatch(entity_id):
+                    raise RpcError("not_found", f"unknown entity {entity_id}")
         try:
             return await handler(self._hass, params)
         except RpcError:

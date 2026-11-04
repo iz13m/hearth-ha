@@ -11,13 +11,14 @@ import asyncio
 from typing import Any
 
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
 from ..labels import is_hearth_scene
 from ..policy import find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .registry import _exposed
+from .registry import _exposed, visible
 from .scenes import scene_run_violations
 from .scripts import script_run_violations
 
@@ -109,11 +110,17 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
     if not hass.services.has_service(domain, service):
         raise RpcError("not_found", f"no such service {domain}.{service}")
 
+    ent_reg = er.async_get(hass)
     for entity_id in raw_ids:
         if hass.states.get(entity_id) is None:
             raise RpcError("not_found", f"unknown entity {entity_id}")
         if not _exposed(hass, entity_id):
             raise RpcError("not_found", f"{entity_id} is not exposed to Assist")
+        # The read rule, so the model cannot operate what `states.get` would not show it (#642): an
+        # entity the registry hid or disabled is refused even when the owner exposed it, in the words
+        # an unknown id gets. One refused id refuses the whole call, before anything is sent.
+        if not visible(hass, entity_id, ent_reg.async_get(entity_id)):
+            raise RpcError("not_found", f"unknown entity {entity_id}")
 
     data = _clean_data(params.get("data"))
     try:
