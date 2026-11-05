@@ -26,12 +26,13 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 
 from ..const import DOMAIN
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import RpcError
 from .resolve import resolve_registry_ids
+from .registry import SWITCH_AS_X, _gates, _source_of, visible
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -299,3 +300,30 @@ def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     problems += find_policy_violations(config, "input") + find_reference_violations(config, "input")
     if problems:
         raise RpcError("validation_failed", "Hearth will not save that: " + "; ".join(problems[:10]))
+
+
+def check_switch_as_x_source(hass: HomeAssistant, domain: str, user_input: dict[str, Any]) -> None:
+    """A `switch_as_x` helper may wrap only a switch the model can see and no gated wrapper holds (#643).
+
+    `helpers.create` and `integrations.flow_step` both reach this flow, so both call it before Home
+    Assistant sees the input. It stops two things. A second wrapper on a lock's relay, as a `cover`
+    an owner could then share without knowing what it drives. And the flow as a way to find out which
+    switches exist but are kept from the model: `helpers.list` shows a lock wrapper with no source id,
+    so a source the model cannot see gets the words a source that does not exist gets, whether it is
+    a ghost, hidden, unexposed or the relay under a lock. Home Assistant itself accepted a ghost and
+    made the wrapper, so this is also a new refusal: Hearth no longer wraps a switch the owner has not
+    exposed. A siren's relay is hidden like a lock's (`OFF_LIMITS`, #605), so only a valve source the
+    model can see gets `method_not_allowed`, as in `devices.call`.
+    """
+    if domain != SWITCH_AS_X or "entity_id" not in user_input:
+        return
+    value = user_input["entity_id"]
+    if not isinstance(value, str):
+        raise RpcError("invalid_params", "entity_id must be a string")
+    ent_reg = er.async_get(hass)
+    source = _source_of(ent_reg, value)
+    gates = _gates(hass)
+    if source is None or hass.states.get(source) is None or not visible(hass, source, ent_reg.async_get(source), gates):
+        raise RpcError("not_found", f"unknown entity {value}")
+    if (gate := gates.get(source)) is not None:
+        raise RpcError("method_not_allowed", f"{value}: this drives a {gate}; Hearth does not wrap it again")

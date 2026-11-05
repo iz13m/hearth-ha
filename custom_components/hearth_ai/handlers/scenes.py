@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 import uuid
 
@@ -18,7 +18,7 @@ from homeassistant.helpers import entity_registry as er
 from ..policy import TARGET_BEARING_KEYS, VALVE_DOMAIN, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
-from .registry import _exposed
+from .registry import OFF_LIMITS, GateMap, _exposed, _gates
 from .resolve import resolve_registry_ids
 
 
@@ -73,7 +73,31 @@ def _members(hass: HomeAssistant, entity_id: str) -> list[str]:
     return [e for e in raw if isinstance(e, str)] if isinstance(raw, list) else []
 
 
-def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[str, Any] | None) -> list[str]:
+def gated_refusals(gates: GateMap, entity_ids: Iterable[str]) -> list[str]:
+    """Why a scene that sets these may not run, for each one a `switch_as_x` gate covers (#643).
+
+    Only where the gate is not the id's own domain: a `lock.*` or `siren.*` is refused by the denied
+    domain check, and a `valve.*` wrapper is direction-checked like any valve. Through any other
+    domain both directions are refused on a valve, because the helper's `invert` makes the direction
+    unknowable (ruling 1). A relay under a gate in `OFF_LIMITS` (a lock or, since #605, a siren) is
+    refused naming neither the gate nor the entity, so the refusal cannot say which switch drives
+    one (#648, #651): every other reader answers for that relay as for an unknown id. Ruling 7 let a
+    siren be named because `entities.list` showed its wrapper; since #605 it does not, so only a
+    valve, whose wrapper is still listed, is named with its gate.
+    """
+    problems = []
+    for eid in entity_ids:
+        gate = gates.get(eid)
+        if gate is None or gate == eid.split(".", 1)[0].lower():
+            continue
+        if gate in OFF_LIMITS:
+            problems.append("this scene sets something Hearth does not operate, so it cannot be activated")
+        else:
+            problems.append(f"{eid}: this drives a {gate}, so a scene that sets it cannot be activated")
+    return list(dict.fromkeys(problems))
+
+
+def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[str, Any] | None, gates: GateMap | None = None) -> list[str]:
     """
     Why a scene may not be activated. Empty means it may.
 
@@ -88,6 +112,11 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
         for eid in members
         if eid.split(".", 1)[0] in DENIED_ENTITY_DOMAINS
     ]
+    # A switch a `switch_as_x` helper presents as a lock, siren or valve, any other wrapper on it, and
+    # any group over one of those (#643): setting it moves what the gate stands for. The config's own
+    # keys count too, in case the attribute is missing.
+    named = members + (list(config["entities"]) if isinstance(config, dict) and isinstance(config.get("entities"), dict) else [])
+    problems += gated_refusals(_gates(hass) if gates is None else gates, named)
     # A scene may close a valve and never open one (#527). The membership attribute names the valve
     # but not the state it is set to, so without scenes.yaml there is no way to tell which way it
     # moves, and that is refused rather than assumed.
@@ -342,12 +371,13 @@ async def scenes_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
     file_ids = {str(i.get(CONF_ID)) for i in data if isinstance(i, dict) and i.get(CONF_ID)}
     by_id = {str(i.get(CONF_ID)): plain(i) for i in data if isinstance(i, dict) and i.get(CONF_ID)}
     out = []
+    gates = _gates(hass)
     for state in sorted(hass.states.async_all(SCENE_DOMAIN), key=lambda s: s.entity_id):
         scene_id = state.attributes.get("id")
         # Listed but not runnable, rather than hidden: the catalog is also how a scene is found in
         # order to *edit* it, and editing a scene the owner never exposed to Assist is fine.
         can_run = _exposed(hass, state.entity_id) and not find_scene_run_violations(
-            hass, state.entity_id, by_id.get(str(scene_id)) if scene_id else None
+            hass, state.entity_id, by_id.get(str(scene_id)) if scene_id else None, gates
         )
         out.append(
             {

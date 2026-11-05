@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
 import voluptuous as vol
@@ -14,15 +15,25 @@ from homeassistant.const import SERVICE_RELOAD
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
 from homeassistant.util import slugify
 
 from ..labels import async_mark_hearth_scene, is_hearth_scene
-from ..policy import find_policy_violations, find_reference_violations
+from ..policy import (
+    _TEMPLATE_RE,
+    INDIRECT_TARGET_KEYS,
+    TARGET_BEARING_KEYS,
+    _data_is_variables,
+    _service_name,
+    _target_selection,
+    find_policy_violations,
+    find_reference_violations,
+)
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
-from .registry import _exposed
+from .registry import GateMap, _exposed, _gates
 from .resolve import resolve_registry_ids
-from .scenes import find_config_violations, find_nested_scene_violations
+from .scenes import find_config_violations, find_nested_scene_violations, gated_refusals
 
 _SLUG = re.compile(r"^[a-z0-9_]+$")
 
@@ -97,6 +108,91 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
     return out
 
 
+def _named_ids(node: Any) -> Iterator[str]:
+    """Every string in a config that could be an entity id, mapping keys and comma lists included."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _named_ids(key)
+            yield from _named_ids(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _named_ids(value)
+    elif isinstance(node, str):
+        yield from (part.strip() for part in node.split(",") if "." in part)
+
+
+UNKNOWABLE_TARGET = "this scene's target cannot be known before it runs, so it cannot be activated"
+_SELECTOR_KEYS = ("entity_id", *INDIRECT_TARGET_KEYS)
+_MATCH_ANY = frozenset({"all", "none"})
+
+
+def _action_nodes(node: Any) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Every service-call node in a config, nested sequences included, with the service it names."""
+    if isinstance(node, list):
+        for n in node:
+            yield from _action_nodes(n)
+    elif isinstance(node, dict):
+        action = _service_name(node)
+        if isinstance(action, str):
+            yield action, node
+        for value in node.values():
+            yield from _action_nodes(value)
+
+
+def _selector_values(node: dict[str, Any], action: str) -> dict[str, list[str]]:
+    """Each selector key's values, from every carrier `_target_selection` reads, comma lists split."""
+    carriers = [node.get("target")] if _data_is_variables(action) else [node.get(k) for k in TARGET_BEARING_KEYS]
+    out: dict[str, list[str]] = {}
+    for source in [*carriers, node]:
+        if not isinstance(source, dict):
+            continue
+        for key in _SELECTOR_KEYS:
+            value = source.get(key)
+            values = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+            for v in values:
+                if isinstance(v, str):
+                    out.setdefault(key, []).extend(p.strip() for p in v.split(",") if p.strip())
+    return out
+
+
+def _selection_refusals(hass: HomeAssistant, gates: GateMap, config: Any) -> list[str]:
+    """What the literal scan cannot see in a scene-script, in a home with a gated wrapper (ruling 10).
+
+    `_named_ids` reads only literal `domain.object` text, and three more forms reach a relay:
+    - **A target that cannot be known before it runs**: a whole-template `target`/`data`/
+      `data_template`, a templated selector value, or `all`. Refused outright, on the fan-out rule's
+      reasoning, in words that name neither the relay nor its gate.
+    - **An indirect target** (`area_id`, `device_id`, `floor_id`, `label_id`): expanded with Home
+      Assistant's own target helper, as HA expands it when the step runs, and the entities it
+      reaches checked like named ones. `primary_entities_only=False` is the wider of HA's two
+      expansions, so a settings entity on the relay's device is not skipped.
+
+    Only where `gates` is not empty, ruling 2's home-wide condition: a home with no gated wrapper
+    has nothing these forms could reach that the literal scan would miss.
+
+    `find_scene_run_violations` cannot meet any of these in a `scenes.yaml` entry: HA's scene schema
+    (`_convert_states`) keys `entities` by `cv.entity_id`, so a template, `all` or a registry UUID is
+    not a key it loads, its states are static values HA never renders, and a scene has no target, so
+    no area, device, floor or label selector.
+    """
+    if gates.empty:
+        return []
+    problems: list[str] = []
+    reached: set[str] = set()
+    for action, node in _action_nodes(config):
+        _keys, _ids, unknowable = _target_selection(node, action)
+        selected = _selector_values(node, action)
+        values = [v for vs in selected.values() for v in vs]
+        if unknowable or any(_TEMPLATE_RE.search(v) or v.lower() in _MATCH_ANY for v in values):
+            problems.append(UNKNOWABLE_TARGET)
+            continue
+        indirect = {k: selected[k] for k in INDIRECT_TARGET_KEYS if k in selected}
+        if indirect:
+            found = async_extract_referenced_entity_ids(hass, TargetSelection(indirect), primary_entities_only=False)
+            reached |= found.referenced | found.indirectly_referenced
+    return problems + gated_refusals(gates, sorted(reached))
+
+
 async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
     """
     Why a script Hearth presents as a scene may not run. Empty means it may.
@@ -129,6 +225,13 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
         return []
     config, _unresolved = resolve_registry_ids(hass, config)  # unresolved is allowed, see above
     problems = find_policy_violations(config) + find_reference_violations(config, "config")
+    # Literal, the two above: a switch a `switch_as_x` helper presents as a lock, siren or valve, or a
+    # group over one, is just a switch to them (#643). Every id-shaped string counts, a condition's
+    # included: this is a scene, and a scene is refused for what it touches.
+    gates = _gates(hass)
+    problems += gated_refusals(gates, _named_ids(config))
+    # Templated, match-all and indirect targets, which the literal scan above cannot see (ruling 10).
+    problems += _selection_refusals(hass, gates, config)
     problems += await find_nested_scene_violations(hass, config)
     return list(dict.fromkeys(problems))
 

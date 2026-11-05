@@ -31,8 +31,8 @@ from homeassistant.loader import async_get_config_flows, async_get_integrations
 
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .flows import DENIED_DOMAINS, check_flow_input, forget_fields, serialize_field_map, shape
-from .registry import OFF_LIMITS, _exposed
+from .flows import DENIED_DOMAINS, check_flow_input, check_switch_as_x_source, forget_fields, serialize_field_map, shape
+from .registry import _exposed, _gates, entry_carries_gate, gated_entry, off_limits
 
 FLOW_TIMEOUT_S = 30
 
@@ -152,8 +152,10 @@ def _entry_dto(hass: HomeAssistant, entry: Any) -> dict[str, Any]:
     ids = [e.entity_id for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)]
     # A `group` of locks, or a template lock, is a real thing an owner may have made by hand. It
     # stays listed so it can still be renamed or removed, but its entity ids never cross the wire:
-    # naming one is the disclosure OFF_LIMITS exists to prevent.
-    visible = [i for i in ids if i.split(".", 1)[0] not in OFF_LIMITS]
+    # naming one is the disclosure OFF_LIMITS exists to prevent. On the effective domain, so a
+    # `switch_as_x` cover beside a lock wrapper is withheld like the lock (#643).
+    gates = _gates(hass)
+    visible = [i for i in ids if not off_limits(hass, i, gates)]
     return {
         "id": entry.entry_id,
         "domain": entry.domain,
@@ -322,6 +324,7 @@ async def helpers_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     if not isinstance(config, dict):
         raise RpcError("invalid_params", "config must be an object")
     check_flow_input(hass, config)
+    check_switch_as_x_source(hass, domain, config)
 
     if domain in INPUT_DOMAINS:
         store = _collection(hass, domain)
@@ -458,6 +461,17 @@ async def helpers_delete(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     # integrations surface has no delete at all, and this is not one by the back door.
     if entry.domain not in await _flow_domains(hass):
         raise RpcError("method_not_allowed", f"{entry.title} is an integration, not a helper; Hearth does not remove integrations")
+    # Removing a `switch_as_x` wrapper hands its switch back un-hidden, and with no gated wrapper left
+    # Hearth would treat that switch as a plain one, so two calls would turn deleting a lock's helper
+    # into opening the lock (#643). Any wrapper on a gated switch, since each one carries its gate.
+    # `helpers.list` already shows the entry, so refusing it says nothing new.
+    if gated_entry(hass, entry):
+        raise RpcError("method_not_allowed", f"{entry.title} makes a switch act as a lock, siren or valve; Hearth does not remove it")
+    # Any other helper a gate rests on, such as a `group` that a lock wrapper wraps: its members' gate
+    # is read off the group's live `entity_id` attribute and would go with it (ruling 9). The refusal
+    # names neither the gate nor what it drives; `helpers.list` already shows this entry restricted.
+    if entry_carries_gate(hass, entry):
+        raise RpcError("method_not_allowed", f"something Hearth does not operate depends on {entry.title}; Hearth does not remove it")
     removed = _entry_dto(hass, entry)["entities"]
     if not await hass.config_entries.async_remove(entry.entry_id):
         raise RpcError("ha_error", "Home Assistant did not remove that helper")

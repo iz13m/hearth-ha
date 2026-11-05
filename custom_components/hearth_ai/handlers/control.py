@@ -18,7 +18,7 @@ from ..labels import is_hearth_scene
 from ..policy import find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .registry import _exposed, visible
+from .registry import _exposed, _gates, effective_domain, visible
 from .scenes import scene_run_violations
 from .scripts import script_run_violations
 
@@ -111,6 +111,7 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
         raise RpcError("not_found", f"no such service {domain}.{service}")
 
     ent_reg = er.async_get(hass)
+    gates = _gates(hass)
     for entity_id in raw_ids:
         if hass.states.get(entity_id) is None:
             raise RpcError("not_found", f"unknown entity {entity_id}")
@@ -120,8 +121,18 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
         # kept from it (#648).
         # `visible()` holds the exposure clause, so it is not checked again here (#259). One refused
         # id refuses the whole call, before anything is sent.
-        if not visible(hass, entity_id, ent_reg.async_get(entity_id)):
+        if not visible(hass, entity_id, ent_reg.async_get(entity_id), gates):
             raise RpcError("not_found", f"unknown entity {entity_id}")
+        # A switch a `switch_as_x` helper presents as a valve, or another wrapper on that switch,
+        # still moves what the helper shows through its own services (#643). A lock or a siren never
+        # gets here: both are in `OFF_LIMITS` (#605), so `visible()` above already refused it. Keyed
+        # on the id, not on `domain`, because `homeassistant.turn_on` and `switch.toggle` reach the
+        # same relay. Both directions are refused
+        # on a valve: the helper's `invert` option decides which switch service closes it, so the
+        # `valve.*` wrapper is the one way to close it, and it stays closable.
+        gate = effective_domain(hass, entity_id, gates)
+        if gate != entity_id.split(".", 1)[0].lower():
+            raise RpcError("method_not_allowed", f"{entity_id}: this drives a {gate}; Hearth refuses it through any other domain's service")
 
     data = _clean_data(params.get("data"))
     try:

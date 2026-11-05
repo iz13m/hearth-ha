@@ -35,7 +35,7 @@ from homeassistant.core import HomeAssistant
 from ..labels import ALL_LABELS, ROLES, hearth_label_of
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .registry import OFF_LIMITS, visible
+from .registry import _gates, off_limits, visible
 
 # The three lists Home Assistant sorts into folders. There is no fourth.
 SCOPES: frozenset[str] = frozenset({"automation", "script", "scene"})
@@ -83,14 +83,16 @@ def _targets(hass: HomeAssistant, params: dict[str, Any]) -> list[str]:
     if len(raw) > MAX_TARGETS:
         raise RpcError("invalid_params", f"at most {MAX_TARGETS} entities at a time")
     ent_reg = er.async_get(hass)
+    gates = _gates(hass)
     out: list[str] = []
     for entity_id in raw:
         if not isinstance(entity_id, str):
             raise RpcError("invalid_params", "entity_ids must be strings")
         # `OFF_LIMITS` is the same union the policy's reference check uses, plus `image`: labelling
-        # is not a way to confirm that a lock exists.
+        # is not a way to confirm that a lock exists. On the effective domain, so not a way to confirm
+        # which switch drives one either (#643).
         domain = entity_id.split(".", 1)[0]
-        if domain in OFF_LIMITS:
+        if off_limits(hass, entity_id, gates):
             raise RpcError("not_found", f"unknown entity {entity_id}")
         ent = ent_reg.async_get(entity_id)
         # What the model may not see is refused in an unknown id's words *before* the registry reason
@@ -103,7 +105,7 @@ def _targets(hass: HomeAssistant, params: dict[str, Any]) -> list[str]:
             raise RpcError("not_found", f"unknown entity {entity_id}")
         # Exposure is the boundary everywhere else, and it is the boundary here — except for the
         # three lists the model reaches through its own tools, which Assist never exposes.
-        if domain not in OWN_LIST_DOMAINS and not visible(hass, entity_id, ent):
+        if domain not in OWN_LIST_DOMAINS and not visible(hass, entity_id, ent, gates):
             raise RpcError("not_found", f"unknown entity {entity_id}")
         if ent is None:
             raise RpcError("not_found", f"{entity_id} is not in the entity registry, so it cannot be labelled")
@@ -174,7 +176,8 @@ async def labels_delete(hass: HomeAssistant, params: dict[str, Any]) -> dict[str
     ent_reg = er.async_get(hass)
     used_by = [e.entity_id for e in ent_reg.entities.values() if label_id in (e.labels or ())]
     lr.async_get(hass).async_delete(label_id)
-    return {"removed_from": [e for e in used_by if e.split(".", 1)[0] not in OFF_LIMITS]}
+    gates = _gates(hass)
+    return {"removed_from": [e for e in used_by if not off_limits(hass, e, gates)]}
 
 
 async def labels_assign(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:

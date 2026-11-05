@@ -40,7 +40,7 @@ from homeassistant.util import dt as dt_util
 
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .registry import OFF_LIMITS, visible
+from .registry import off_limits, visible
 
 DEFAULT_POINTS = 500
 MAX_POINTS = 2000
@@ -76,7 +76,9 @@ def _entity(hass: HomeAssistant, entity_id: str) -> Any:
     One message for "hidden from you" and for "does not exist", because the difference is itself
     worth knowing: an id that answers differently is an id someone can probe for.
     """
-    if entity_id.split(".", 1)[0] in OFF_LIMITS:
+    # The effective domain, so a switch a `switch_as_x` helper presents as a siren is not read as
+    # history either (#643).
+    if off_limits(hass, entity_id):
         raise RpcError("not_found", f"unknown entity {entity_id}")
     state = hass.states.get(entity_id)
     # The whole rule, registry clause included: AGENTS.md's invariant 1 says hidden and disabled

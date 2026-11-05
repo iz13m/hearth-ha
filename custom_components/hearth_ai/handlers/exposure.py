@@ -37,7 +37,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from ..rpc import ENTITY_ID, Dispatcher, RpcError
 # `OFF_LIMITS` is shared with the history handler; it lives next to the domain lists it is built
 # from. Consulted here only when *adding*. See rule 3 in the module docstring.
-from .registry import ASSISTANT, OFF_LIMITS, _category, _device_name, _entity_area
+from .registry import ASSISTANT, OFF_LIMITS, GateMap, _category, _device_name, _entity_area, _gates, effective_domain
 
 MAX_IDS = 100
 DEFAULT_LIMIT = 500
@@ -64,9 +64,13 @@ def _str_param(params: dict[str, Any], key: str) -> str | None:
     return value
 
 
-def _shareable(entity_id: str) -> bool:
-    """Whether this entity may ever be *added*. Un-sharing ignores this by design."""
-    return entity_id.split(".", 1)[0] not in OFF_LIMITS
+def _shareable(hass: HomeAssistant, entity_id: str, gates: GateMap | None = None) -> bool:
+    """Whether this entity may ever be *added*. Un-sharing ignores this by design.
+
+    On the effective domain: a switch a `switch_as_x` helper presents as a lock, and every other
+    wrapper on that switch, is the lock here (#643).
+    """
+    return effective_domain(hass, entity_id, gates) not in OFF_LIMITS
 
 
 def _refusal(hass: HomeAssistant, entity_id: str, ent_reg: er.EntityRegistry, *, expose: bool) -> dict[str, str] | None:
@@ -84,8 +88,9 @@ def _refusal(hass: HomeAssistant, entity_id: str, ent_reg: er.EntityRegistry, *,
     # goes through. `fullmatch`: the old `match` with `$` let a trailing newline through.
     if not ENTITY_ID.fullmatch(entity_id):
         return {"code": "not_entity", "reason": "not an entity id"}
-    domain = entity_id.split(".", 1)[0]
-    if expose and domain in OFF_LIMITS:
+    # The effective domain (#643), looked up only when sharing: `entities.exposable` asks this for
+    # every entity in the home with `expose=False`.
+    if expose and (domain := effective_domain(hass, entity_id)) in OFF_LIMITS:
         # Not "you lack permission": Hearth can never operate these, so sharing one would only
         # promise something the action policy refuses later.
         return {"code": "off_limits", "reason": f"Hearth never works with {domain} entities", "domain": domain}
@@ -130,6 +135,7 @@ async def entities_exposable(hass: HomeAssistant, params: dict[str, Any]) -> lis
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
 
+    gates = _gates(hass)
     rows: list[dict[str, Any]] = []
     for state in sorted(hass.states.async_all(), key=lambda s: s.entity_id):
         entity_id = state.entity_id
@@ -139,7 +145,7 @@ async def entities_exposable(hass: HomeAssistant, params: dict[str, Any]) -> lis
             continue
         if _refusal(hass, entity_id, ent_reg, expose=False) is not None:
             continue
-        shareable = _shareable(entity_id)
+        shareable = _shareable(hass, entity_id, gates)
         exposed = _should_expose(hass, entity_id)
         # Rule 3: an off-limits entity is listed only so that it can be removed.
         if not shareable and not exposed:

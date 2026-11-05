@@ -25,7 +25,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.hearth_ai import subscriber as sub
-from custom_components.hearth_ai.handlers import history, organise, registry
+from custom_components.hearth_ai.handlers import flows, history, organise, registry
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 SHOWN = "switch.shown"
@@ -127,6 +127,8 @@ async def _answers(hass: HomeAssistant) -> dict[str, set[str]]:
         "states.get": {i for i in CORPUS if await get(i)},
         "states.history": {i for i in CORPUS if not refuses(lambda i=i: history._entity(hass, i))},
         "devices.call": {i for c in turned_on for i in c.data["entity_id"]},
+        # The source a `switch_as_x` flow may wrap (#643): the check itself, so no entry is made.
+        "switch_as_x": {i for i in CORPUS if not refuses(lambda i=i: flows.check_switch_as_x_source(hass, "switch_as_x", {"entity_id": i}))},
     }
 
 
@@ -145,6 +147,7 @@ async def test_every_reader_answers_the_rule_it_names(core: HomeAssistant) -> No
         "states.get": FULL,
         "states.history": FULL,
         "devices.call": FULL,
+        "switch_as_x": FULL,
     }
 
 
@@ -153,15 +156,15 @@ async def test_every_reader_asks_visible(core: HomeAssistant, monkeypatch: pytes
 
     `visible()` is swapped, in every module that imported it, for one that also refuses the control.
     A reader that asks it stops answering for the control; one that decides for itself does not.
-    Scope: the five readers and `devices.call` that `_answers` calls. The swap reaches any module that imports `visible()`,
+    Scope: the five readers, `devices.call` and the `switch_as_x` source check that `_answers` calls. The swap reaches any module that imports `visible()`,
     but a new reader is only checked once it has a row in `_answers`, and one that never imports
     `visible()` is not found here at all.
     """
     await _corpus(core)
     real = registry.visible
 
-    def stricter(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
-        return entity_id != SHOWN and real(hass, entity_id, ent)
+    def stricter(hass: HomeAssistant, entity_id: str, ent: Any, gates: Any = None) -> bool:
+        return entity_id != SHOWN and real(hass, entity_id, ent, gates)
 
     holders = [
         m
@@ -169,7 +172,7 @@ async def test_every_reader_asks_visible(core: HomeAssistant, monkeypatch: pytes
         if name.startswith("custom_components.hearth_ai") and getattr(m, "visible", None) is real
     ]
     # The control for the discovery: it must find every module this file names, or the swap is partial.
-    assert {m.__name__.rsplit(".", 1)[-1] for m in holders} >= {"registry", "subscriber", "organise", "history", "control"}
+    assert {m.__name__.rsplit(".", 1)[-1] for m in holders} >= {"registry", "subscriber", "organise", "history", "control", "flows"}
     for m in holders:
         monkeypatch.setattr(m, "visible", stricter)
 
@@ -180,6 +183,7 @@ async def test_every_reader_asks_visible(core: HomeAssistant, monkeypatch: pytes
         "states.get": set(),
         "states.history": set(),
         "devices.call": set(),
+        "switch_as_x": set(),
     }
 
 

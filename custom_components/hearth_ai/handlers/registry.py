@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import (
@@ -52,6 +53,16 @@ HIDDEN_DOMAINS: frozenset[str] = frozenset({"camera", "device_tracker", "person"
 # Lives here rather than in `exposure.py`, where it started, because every handler that reads or
 # lists entities depends on it meaning exactly the same thing (AgDR-0036).
 OFF_LIMITS: frozenset[str] = HIDDEN_DOMAINS | DENIED_ENTITY_DOMAINS
+
+# Home Assistant's `switch_as_x` helper presents a switch as one of these, and the switch keeps its own
+# services: `switch.turn_on` on the source moves the lock the helper shows (#643). These are the
+# targets Hearth refuses or direction-gates; a `cover`, `fan` or `light` wrapper alone changes nothing.
+SWITCH_AS_X = "switch_as_x"
+# Strictest first, which decides a source wrapped as more than one of them (`_gates`): a lock is
+# hidden as well as refused, and so is a siren (both are in `OFF_LIMITS`, #605); a valve is moved only
+# by a `valve.*` service.
+_GATED_BY_STRICTNESS: tuple[str, ...] = ("lock", "siren", "valve")
+GATED_WRAPPER_DOMAINS: frozenset[str] = frozenset(_GATED_BY_STRICTNESS)
 
 MAX_ATTR_STR = 500
 # The AI only sees what the user exposed to Assist (Settings > Voice assistants > Expose).
@@ -130,7 +141,182 @@ def _category(ent: Any) -> str | None:
     return value if value in ("config", "diagnostic") else None
 
 
-def visible(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
+class GateMap:
+    """Every entity's `switch_as_x` gate (#643), worked out on demand and kept for one call.
+
+    An entity's gate is the strictest, in `_GATED_BY_STRICTNESS` order, of every gated `switch_as_x`
+    wrapper it reaches by following two relations as far as they go:
+
+    - **A `switch_as_x` source and every wrapper on it are one thing** (ruling 5). A `cover` beside a
+      `lock` on one relay drives the same relay, so it is the lock as far as Hearth is concerned; so
+      is a `valve` beside one, which is why #527's "a valve may always close" does not reach it.
+    - **A group is its members** (ruling 6). A `switch` group whose member is a lock's relay forwards
+      `switch.turn_on` to that relay, and the model can make one with `helpers.create`. A group
+      publishes its members as the `entity_id` state attribute, whatever its domain.
+
+    Followed together, so a `cover` wrapper whose source is a group over the relay is the lock too
+    (ruling 8), and a group of groups is covered. The walk only goes from an entity to what it
+    drives, never back up: "all outside switches" over the relay is the lock, the porch switch beside
+    it in that group is not. The one exception is a group that is *itself* wrapped as a lock, siren or
+    valve: then each member drives part of what the wrapper stands for, so the gate flows down to
+    them too (ruling 9). Only from a gated source, never from a group that merely contains one. A scene asked about *itself* is not walked (ruling 7): it stays listed,
+    as one that sets a real lock does, and `find_scene_run_violations` refuses to activate it. A
+    scene reached as a group's member is walked, because `homeassistant.turn_on` on an old-style
+    group activates it.
+
+    Reads every `switch_as_x` config entry, disabled ones included (`async_entries`' default): the
+    relay underneath still drives the lock while its wrapper is switched off. `options["entity_id"]`
+    holds either the source's entity_id or its registry id, and is resolved the way the helper's own
+    setup resolves it; an entry whose source cannot be resolved is skipped rather than raised, as
+    Home Assistant cannot set such a wrapper up either. Membership is read off the state machine one
+    entity at a time, so nothing scans every state, not even the subscriber's `state_changed` callback.
+    Nothing outlives the map, and a caller builds one per call, so a wrapper added or a member
+    changed a moment ago already counts.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+        ent_reg = er.async_get(hass)
+        # Each source and each wrapper on it, mapped to the same set: the source and all its wrappers.
+        self._same: dict[str, set[str]] = {}
+        # Each source, mapped to the strictest gated target of any wrapper on it.
+        self._own: dict[str, str] = {}
+        for entry in hass.config_entries.async_entries(SWITCH_AS_X):
+            if (source := _source_of(ent_reg, entry.options.get("entity_id"))) is None:
+                continue
+            same = self._same.setdefault(source, {source})
+            if (target := entry.options.get("target_domain")) in GATED_WRAPPER_DOMAINS:
+                self._own[source] = _stricter(self._own.get(source), target)
+            for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+                same.add(ent.entity_id)
+                self._same[ent.entity_id] = same
+        for source, gate in list(self._own.items()):
+            seen = {source}
+            todo = [source]
+            while todo:
+                for member in self._members(todo.pop()):
+                    if member not in seen:
+                        seen.add(member)
+                        todo.append(member)
+                        self._own[member] = _stricter(self._own.get(member), gate)
+        self._known: dict[str, str | None] = {}
+
+    @property
+    def empty(self) -> bool:
+        """Whether the home has no gated wrapper at all, so no entity has a gate (ruling 2's condition)."""
+        return not self._own
+
+    def get(self, entity_id: str) -> str | None:
+        """The entity's gate, or None."""
+        if not self._own:
+            # The common home: no gated wrapper, so nothing to walk and nothing worth caching. The
+            # state subscriber asks this once per `state_changed`.
+            return None
+        key = entity_id.lower()
+        if key not in self._known:
+            self._known[key] = self._walk(key)
+        return self._known[key]
+
+    def __contains__(self, entity_id: str) -> bool:
+        return self.get(entity_id) is not None
+
+    def drives(self, entity_id: str) -> bool:
+        """Whether a gate *rests on* this entity: a gated wrapper's source, or something a gated
+        group above it hands its gate down to (ruling 9).
+
+        Distinct from `get`, which also answers for anything that merely reaches a gated entity. An
+        unwrapped "All outside" group over a lock's relay has a gate through `get`, but removing it
+        takes no gate away from anything, so it is not a seed; a lock-wrapped group is, because its
+        members' gates are read off its live `entity_id` attribute and go with it.
+        """
+        return entity_id.lower() in self._own
+
+    def _walk(self, start: str) -> str | None:
+        if not self._own:
+            return None
+        gate: str | None = None
+        seen = {start}
+        todo = [start]
+        while todo:
+            entity_id = todo.pop()
+            gate = _stricter(gate, self._own.get(entity_id))
+            reach = set(self._same.get(entity_id, ()))
+            if not (entity_id == start and entity_id.startswith("scene.")):
+                reach.update(self._members(entity_id))
+            todo += [e for e in reach if e not in seen]
+            seen |= reach
+        return gate
+
+    def _members(self, entity_id: str) -> list[str]:
+        state = self._hass.states.get(entity_id)
+        members = state.attributes.get("entity_id") if state is not None else None
+        members = [members] if isinstance(members, str) else members
+        return [m.lower() for m in members if isinstance(m, str)] if isinstance(members, (list, tuple)) else []
+
+
+def _stricter(a: str | None, b: str | None) -> str | None:
+    """The stricter of two gates, either of which may be None."""
+    if a is None or b is None:
+        return a or b
+    return min(a, b, key=_GATED_BY_STRICTNESS.index)
+
+
+def _gates(hass: HomeAssistant) -> GateMap:
+    """A fresh `GateMap`. A caller asking about many entities builds one and passes it along."""
+    return GateMap(hass)
+
+
+def _source_of(ent_reg: er.EntityRegistry, value: Any) -> str | None:
+    """A `switch_as_x` source as an entity_id, from either form its `entity_id` option takes, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return er.async_validate_entity_id(ent_reg, value.lower())
+    except vol.Invalid:
+        return None
+
+
+def gated_entry(hass: HomeAssistant, entry: Any) -> bool:
+    """Whether this config entry is a `switch_as_x` wrapper on a gated source, of any target (#643)."""
+    if entry.domain != SWITCH_AS_X:
+        return False
+    source = _source_of(er.async_get(hass), entry.options.get("entity_id"))
+    return source is not None and source in _gates(hass)
+
+
+def entry_carries_gate(hass: HomeAssistant, entry: Any, gates: GateMap | None = None) -> bool:
+    """Whether a gate rests on any entity of this config entry (`GateMap.drives`), whatever its domain.
+
+    A `group` helper that a `switch_as_x` helper wraps as a lock hands the lock's gate down to its
+    members (ruling 9), read off the group's live `entity_id` attribute; removing the group's own
+    entry would take that gate off every member, and `switch.turn_on` on one would reach the lock.
+    """
+    gates = _gates(hass) if gates is None else gates
+    if gates.empty:
+        return False
+    return any(gates.drives(ent.entity_id) for ent in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id))
+
+
+def wrapped_domain(hass: HomeAssistant, entity_id: str) -> str | None:
+    """The gate `_gates` gives this entity, or None: the source switch or any wrapper on it (#643)."""
+    return _gates(hass).get(entity_id.lower())
+
+
+def effective_domain(hass: HomeAssistant, entity_id: str, gates: GateMap | None = None) -> str:
+    """The domain Hearth's rules apply to: a gated wrapper's, else the id's own.
+
+    A caller asking about many entities passes one `_gates(hass)` rather than have one built per id.
+    """
+    gate = (_gates(hass) if gates is None else gates).get(entity_id)
+    return gate or entity_id.split(".", 1)[0]
+
+
+def off_limits(hass: HomeAssistant, entity_id: str, gates: GateMap | None = None) -> bool:
+    """Whether `OFF_LIMITS` covers this entity, on its effective domain (#643)."""
+    return effective_domain(hass, entity_id, gates) in OFF_LIMITS
+
+
+def visible(hass: HomeAssistant, entity_id: str, ent: Any, gates: GateMap | None = None) -> bool:
     """Whether the model may see this entity: the one rule the readers named below apply (#259).
 
     Not every list of the home's entities applies it. `scripts.list` and `scenes.list` list their own
@@ -138,15 +324,22 @@ def visible(hass: HomeAssistant, entity_id: str, ent: Any) -> bool:
     with `can_run`.
 
     Three clauses: the domain is not in `OFF_LIMITS`, the registry has not hidden or disabled it,
-    and the owner exposed it to Assist. `entities.list` (poll), the state subscriber (push), the label
+    and the owner exposed it to Assist. The domain is the effective one, so a switch a `switch_as_x`
+    helper presents as a lock, and every other wrapper on that switch, is hidden like the lock,
+    exposed and un-hidden or not (#643). `entities.list` (poll), the state subscriber (push), the label
     targets in `organise.py`, `states.get` and `states.history` all call this, so push and poll cannot
     disagree: there is one copy of the rule. `devices.call` asks it too, so the model cannot operate
-    what it cannot read (#642). `tests/test_visibility.py` goes red if one of these stops calling it;
+    what it cannot read (#642), and so does a `switch_as_x` flow about its source, so the model cannot
+    wrap what it cannot read either (#643). `tests/test_visibility.py` goes red if one of these stops calling it;
     a new reader needs its own row there.
 
-    `ent=None` skips the middle clause, so a caller must look the entry up and pass it.
+    `ent=None` skips the middle clause, so a caller must look the entry up and pass it. A caller
+    asking about many entities passes one `gates` for all of them.
+
+    The literal domain is checked as well as the effective one, so no gate, whatever the order of
+    `_GATED_BY_STRICTNESS`, can surface a `lock.*` wrapper by giving it a weaker one.
     """
-    if entity_id.split(".", 1)[0] in OFF_LIMITS:
+    if entity_id.split(".", 1)[0] in OFF_LIMITS or effective_domain(hass, entity_id, gates) in OFF_LIMITS:
         return False
     if ent is not None and (ent.hidden_by or ent.disabled_by):
         return False
@@ -207,6 +400,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
 
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
+    gates = _gates(hass)
     out: list[dict[str, Any]] = []
     for state in sorted(hass.states.async_all(), key=lambda s: s.entity_id):
         # Keyset paging. Iteration is already sorted by entity_id, so "resume past this id" needs no
@@ -218,7 +412,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         if domain and state.domain != domain:
             continue
         ent = ent_reg.async_get(state.entity_id)
-        if not visible(hass, state.entity_id, ent):
+        if not visible(hass, state.entity_id, ent, gates):
             continue
         entity_area = _entity_area(ent, dev_reg)
         if area_id and entity_area != area_id:
