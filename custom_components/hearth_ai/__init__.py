@@ -11,8 +11,9 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.start import async_at_started
 
+from .claim import async_confirm, async_forget as async_forget_claim, async_pending_secret, async_save_pending, entry_claimed
 from .client import HearthClient
-from .const import CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN, ENTRY_TITLE, INTEGRATION_VERSION, LEGACY_ENTRY_TITLE
+from .const import CONF_CONFIRMED, CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN, ENTRY_TITLE, INTEGRATION_VERSION, LEGACY_ENTRY_TITLE
 from .labels import async_ensure_labels
 from .options import HearthOptions
 from .panel import async_register_panel, async_unregister_panel
@@ -56,6 +57,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bo
     # The sidebar is local and has nothing to do with the connection, so a home whose hub is down
     # can still be arranged — and a home that has not finished pairing can be arranged first.
     await async_register_panel(hass, INTEGRATION_VERSION)
+    # A secret offered in `claim.approve` that no `hello` has proven yet (the reply was lost, or Home
+    # Assistant stopped before the entry's delayed save): the client tries it before the entry's own.
+    pending_secret = await async_pending_secret(hass, entry)
     options = HearthOptions.from_entry(entry)
     capabilities = options.capabilities
     dispatcher = build_dispatcher(hass, frozenset(capabilities))
@@ -70,6 +74,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bo
         dispatcher=dispatcher,
         on_status=_status,
         capabilities=capabilities,
+        claimed=entry_claimed(entry),
+        confirmed=entry.data.get(CONF_CONFIRMED, True) is not False,
+        on_confirmed=lambda confirmed: _remember_confirmed(hass, entry, confirmed),
+        pending_secret=pending_secret,
+        on_secret_pending=lambda secret: async_save_pending(hass, entry, secret),
+        on_claimed=lambda info: async_confirm(hass, entry, info),
+        # The hub forgot this unclaimed home: Home Assistant's own "needs attention" flow re-registers.
+        on_expired=lambda: entry.async_start_reauth(hass),
     )
     entry.runtime_data = HearthData(client=client, options=options)
 
@@ -97,3 +109,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> b
     if len(hass.config_entries.async_entries(DOMAIN)) <= 1:
         async_unregister_panel(hass)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+def _remember_confirmed(hass: HomeAssistant, entry: HearthConfigEntry, confirmed: bool) -> None:
+    """Keep what the last hello said about the owner's confirmation across a restart."""
+    data = {k: v for k, v in entry.data.items() if k != CONF_CONFIRMED}
+    if not confirmed:
+        data[CONF_CONFIRMED] = False
+    hass.config_entries.async_update_entry(entry, data=data)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> None:
+    """The entry is deleted: so is any install secret kept from claiming it."""
+    await async_forget_claim(hass, entry)

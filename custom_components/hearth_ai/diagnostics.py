@@ -8,11 +8,12 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
 from . import HearthConfigEntry
-from .const import CONF_INSTALL_SECRET, CONF_PAIRING_TOKEN
+from .const import CONF_INSTALL_SECRET, CONF_OWNER_EMAIL, CONF_PAIRING_TOKEN
 from .options import HearthOptions
 from .rpc import ALLOWED_METHODS
 
-TO_REDACT = {CONF_INSTALL_SECRET, CONF_PAIRING_TOKEN}
+# The owner's email is personal data, and a diagnostics file is made to be shared.
+TO_REDACT = {CONF_INSTALL_SECRET, CONF_PAIRING_TOKEN, CONF_OWNER_EMAIL}
 
 
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: HearthConfigEntry) -> dict[str, Any]:

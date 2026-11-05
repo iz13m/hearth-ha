@@ -1,7 +1,13 @@
-"""Config flow: paste a pairing token, exchange it for an install secret."""
+"""Config flow: connect to the hub, with a pairing token or (AgDR-0064) without one.
+
+With a pairing token the box trades it for an install secret, as it always has; that path is the
+operator's, kept for homes that already have one. With none, the box registers an **unclaimed** home
+and the HA admin claims it afterwards in the Azka panel, by approving the owner's claim link there.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -13,10 +19,12 @@ from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_CLAIMED,
     CONF_HUB_URL,
     CONF_INSTALL_SECRET,
     CONF_INSTALLATION_ID,
     CONF_PAIRING_TOKEN,
+    CONF_UNCLAIMED_EXPIRES_AT,
     CONF_WS_URL,
     DEFAULT_HUB_URL,
     DOMAIN,
@@ -28,10 +36,12 @@ _LOGGER = logging.getLogger(__name__)
 
 STEP_USER_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_PAIRING_TOKEN): str,
+        # Optional since AgDR-0064: leave it empty and the home is claimed in the Azka panel.
+        vol.Optional(CONF_PAIRING_TOKEN): str,
         vol.Optional(CONF_HUB_URL, default=DEFAULT_HUB_URL): str,
     }
 )
+STEP_REAUTH_SCHEMA = vol.Schema({vol.Optional(CONF_PAIRING_TOKEN): str})
 
 
 class HearthConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -43,51 +53,126 @@ class HearthConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             hub_url = user_input.get(CONF_HUB_URL, DEFAULT_HUB_URL).rstrip("/")
-            token = user_input[CONF_PAIRING_TOKEN].strip()
+            token = str(user_input.get(CONF_PAIRING_TOKEN) or "").strip()
             if not _url_allowed(hub_url):
                 errors[CONF_HUB_URL] = "invalid_url"
             else:
                 try:
-                    result = await self._pair(hub_url, token)
+                    data = await self._connect(hub_url, token)
                 except _PairError as err:
                     errors["base"] = err.code
                 else:
-                    await self.async_set_unique_id(result["installation_id"])
+                    await self.async_set_unique_id(data[CONF_INSTALLATION_ID])
                     self._abort_if_unique_id_configured()
-                    return self.async_create_entry(
-                        title=ENTRY_TITLE,
-                        data={
-                            CONF_HUB_URL: hub_url,
-                            CONF_INSTALLATION_ID: result["installation_id"],
-                            CONF_INSTALL_SECRET: result["install_secret"],
-                            CONF_WS_URL: result["ws_url"],
-                        },
-                    )
+                    if data.get(CONF_CLAIMED) is False:
+                        # Shown on the success dialog: the home exists, and is nobody's yet.
+                        return self.async_create_entry(title=ENTRY_TITLE, data=data, description="unclaimed")
+                    return self.async_create_entry(title=ENTRY_TITLE, data=data)
         return self.async_show_form(step_id="user", data_schema=STEP_USER_SCHEMA, errors=errors)
 
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
+        """The hub forgot this home (nobody claimed it in time)."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Register again (or pair with a token) against the same hub, keeping the entry's options.
+
+        A new registration is a **new** home with a new id (AgDR-0064 R2): nothing moves across, so
+        the entry's unique id follows it.
+        """
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            token = str(user_input.get(CONF_PAIRING_TOKEN) or "").strip()
+            hub_url = str(entry.data.get(CONF_HUB_URL, DEFAULT_HUB_URL)).rstrip("/")
+            try:
+                data = await self._connect(hub_url, token)
+            except _PairError as err:
+                errors["base"] = err.code
+            else:
+                return self.async_update_reload_and_abort(entry, unique_id=data[CONF_INSTALLATION_ID], data=data)
+        return self.async_show_form(step_id="reauth_confirm", data_schema=STEP_REAUTH_SCHEMA, errors=errors)
+
+    async def _connect(self, hub_url: str, token: str) -> dict[str, Any]:
+        """The entry's data: paired with the token, or, with none, registered as an unclaimed home."""
+        if token:
+            result = await self._pair(hub_url, token)
+            return {
+                CONF_HUB_URL: hub_url,
+                CONF_INSTALLATION_ID: result["installation_id"],
+                CONF_INSTALL_SECRET: result["install_secret"],
+                CONF_WS_URL: result["ws_url"],
+            }
+        result = await self._register(hub_url)
+        return {
+            CONF_HUB_URL: hub_url,
+            CONF_INSTALLATION_ID: result["installation_id"],
+            CONF_INSTALL_SECRET: result["install_secret"],
+            CONF_WS_URL: result["ws_url"],
+            CONF_CLAIMED: False,
+            CONF_UNCLAIMED_EXPIRES_AT: result["expires_at"],
+        }
+
     async def _pair(self, hub_url: str, token: str) -> dict[str, Any]:
-        session = async_get_clientsession(self.hass)
         payload = {
             "pairing_token": token,
             "ha_version": HA_VERSION,
             "integration_version": INTEGRATION_VERSION,
             "name": self.hass.config.location_name or "Home",
         }
+        return await self._post(hub_url, "/api/integration/pair", payload, {401: "invalid_token"})
+
+    async def _register(self, hub_url: str) -> dict[str, Any]:
+        """`POST /api/integration/register` (AgDR-0064): an unclaimed home, which can do nothing yet."""
+        payload = {
+            "ha_version": HA_VERSION[:32],
+            "integration_version": INTEGRATION_VERSION[:32],
+            "name": (self.hass.config.location_name or "Home")[:100],
+        }
+        # 404: a hub older than the claim flow. 503: the hub is not taking new homes right now.
+        # 429 here is the hub's five-an-hour limit per address, not pairing's per-minute one.
+        data = await self._post(
+            hub_url,
+            "/api/integration/register",
+            payload,
+            {404: "register_unsupported", 429: "register_rate_limited", 503: "hub_full"},
+            {"rate_limited": "register_rate_limited", "hub_full": "hub_full", "invalid_request": "register_invalid"},
+        )
+        if data.get("claimed") is not False or not isinstance(data.get("expires_at"), str):
+            raise _PairError("cannot_connect")
+        return data
+
+    async def _post(
+        self, hub_url: str, path: str, payload: dict[str, Any], codes: dict[int, str], errors: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """Both first-contact calls answer the same three fields and get the same checks.
+
+        A refusal's JSON `error` decides when it names one this form knows (`errors`); otherwise the
+        status does, so a hub that answers without a body is read as before.
+        """
+        errors = errors or {}
+        session = async_get_clientsession(self.hass)
         try:
-            async with session.post(f"{hub_url}/api/integration/pair", json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 401:
-                    raise _PairError("invalid_token")
+            async with session.post(f"{hub_url}{path}", json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    reason = await _refusal(resp)
+                    if reason is not None and reason in errors:
+                        raise _PairError(errors[reason])
+                if resp.status in codes:
+                    raise _PairError(codes[resp.status])
                 if resp.status == 429:
                     raise _PairError("rate_limited")
                 if resp.status != 200:
-                    _LOGGER.warning("pairing failed: HTTP %s", resp.status)
+                    _LOGGER.warning("%s failed: HTTP %s", path, resp.status)
                     raise _PairError("cannot_connect")
                 data = await resp.json()
         except _PairError:
             raise
-        except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.warning("pairing request failed: %s", err)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.warning("%s request failed: %s", path, err)
             raise _PairError("cannot_connect") from err
+        if not isinstance(data, dict):
+            raise _PairError("cannot_connect")
         for key in ("installation_id", "install_secret", "ws_url"):
             if not isinstance(data.get(key), str):
                 raise _PairError("cannot_connect")
@@ -108,6 +193,16 @@ def _url_allowed(url: str) -> bool:
         host = url[7:].split("/", 1)[0].split(":", 1)[0]
         return host in _DEV_HOSTS
     return False
+
+
+async def _refusal(resp: aiohttp.ClientResponse) -> str | None:
+    """The `error` of a hub refusal's `{error, message}` body, or None for anything else."""
+    try:
+        body = await resp.json(content_type=None)
+    except (aiohttp.ClientError, ValueError):
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    return error if isinstance(error, str) else None
 
 
 class _PairError(Exception):

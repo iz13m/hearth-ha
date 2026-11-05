@@ -1,10 +1,13 @@
 """The Hearth panel in the Home Assistant sidebar (AgDR-0046).
 
-Everything here is local to Home Assistant. The panel never talks to the hub: it reads this home's
-own registries and writes the arrangement to `helpers.storage`, and the hub reads that separately
-over `presentation.get`. So it works with the hub unreachable, needs no credential in the browser,
-and is admin-only because Home Assistant itself says so — `require_admin=True` means the sidebar item
-does not exist for anyone else and the panel is refused if they ask for it by URL.
+Everything here is local to Home Assistant. The arrangement never talks to the hub: it reads this
+home's own registries and writes the arrangement to `helpers.storage`, and the hub reads that
+separately over `presentation.get`. So it works with the hub unreachable, needs no credential in the
+browser, and is admin-only because Home Assistant itself says so — `require_admin=True` means the
+sidebar item does not exist for anyone else and the panel is refused if they ask for it by URL.
+
+The one exception is the claim card (AgDR-0064, at the bottom), which asks the hub about a claim
+link through the box's own outbound socket and nothing else.
 """
 
 from __future__ import annotations
@@ -17,14 +20,17 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
 from homeassistant.components.http import StaticPathConfig
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
-from .const import DOMAIN
+from .claim import entry_claimed, extract_claim_token
+from .const import CONF_CONFIRMED, CONF_OWNER_EMAIL, CONF_UNCLAIMED_EXPIRES_AT, DOMAIN
 from .handlers.exposure import apply_exposure
 from .handlers.registry import ASSISTANT, OFF_LIMITS
 from .labels import async_notify_registry_changed, roles_of
 from .presentation import ROUTINE_DOMAINS, ProfileError, async_load, async_save, validate, warnings
+from .rpc import RpcError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,7 +106,7 @@ def async_unregister_panel(hass: HomeAssistant) -> None:
 
 
 def _register_commands(hass: HomeAssistant) -> None:
-    for command in (panel_state, panel_save, panel_expose):
+    for command in (panel_state, panel_save, panel_expose, claim_status, claim_lookup, claim_approve, claim_decline):
         websocket_api.async_register_command(hass, command)
 
 
@@ -244,3 +250,114 @@ def _exposed(hass: HomeAssistant, entity_id: str) -> bool:
         return async_should_expose(hass, ASSISTANT, entity_id)
     except Exception:  # noqa: BLE001 - no exposure store means nothing is shared
         return False
+
+
+# ---------------------------------------------------------------- claiming (AgDR-0064)
+# The one part of the panel that reaches the hub, and only through the box's own outbound socket:
+# the browser holds no credential, and the new install secret an approval offers is made, kept and
+# sent by the client and never reaches this module. Admin-only like every other command, because approving makes someone
+# the owner of this home, which is exactly the authority an HA admin already has over it (R1).
+
+
+def _entries(hass: HomeAssistant) -> list[ConfigEntry]:
+    return hass.config_entries.async_entries(DOMAIN)
+
+
+def _client_of(entry: ConfigEntry) -> Any:
+    if entry.state is not ConfigEntryState.LOADED:
+        return None
+    return getattr(getattr(entry, "runtime_data", None), "client", None)
+
+
+def _home(entry: ConfigEntry) -> dict[str, Any]:
+    client = _client_of(entry)
+    claimed = client.claimed if client is not None else entry_claimed(entry)
+    # The client's is the hub's latest word (None once a lookup moved it). The entry's is only what
+    # registration said, so it stands in only when there is no client to ask.
+    expires = client.unclaimed_expires_at if client is not None else entry.data.get(CONF_UNCLAIMED_EXPIRES_AT)
+    return {
+        "entry_id": entry.entry_id,
+        "title": entry.title,
+        "claimed": claimed,
+        # Claimed through the panel, and the owner has not yet said "this is my home" in the app. Only
+        # a hello on the current connection is current; otherwise what the entry kept from the last.
+        "confirmed": (
+            (bool(client.confirmed) if client is not None and client.hello_ok else entry.data.get(CONF_CONFIRMED, True) is not False)
+            if claimed
+            else True
+        ),
+        "connected": bool(client is not None and client.connected),
+        "expired": bool(client is not None and client.expired),
+        "expires_at": None if claimed else expires,
+        # From the hub's own hello when connected (so a missed approval reply still shows it), else
+        # what the entry remembers from the approval.
+        "owner_email": ((client.owner_email if client is not None else None) or entry.data.get(CONF_OWNER_EMAIL)) if claimed else None,
+    }
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/panel/claim/status"})
+@websocket_api.require_admin
+@callback
+def claim_status(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Whether each Azka entry on this box belongs to someone yet. Read locally, never from the hub."""
+    connection.send_result(msg["id"], {"homes": [_home(e) for e in _entries(hass)]})
+
+
+async def _claim_call(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any], method: str) -> None:
+    # Checked here as well as on the hub, so a mistyped link costs no round trip and no rate limit.
+    token = extract_claim_token(msg.get("link") or msg.get("token") or "")
+    if token is None:
+        connection.send_error(msg["id"], "invalid_format", "That is not an Azka claim link. Copy it again from the Azka app.")
+        return
+    entry = next((e for e in _entries(hass) if e.entry_id == msg["entry_id"]), None)
+    if entry is None:
+        connection.send_error(msg["id"], "not_found", "That Azka connection is not set up here.")
+        return
+    client = _client_of(entry)
+    if client is None or not client.connected:
+        connection.send_error(msg["id"], "offline", "This home is not connected to Azka right now. Try again in a moment.")
+        return
+    params: dict[str, Any] = {"token": token}
+    if method != "claim.lookup":
+        # For the hub's audit row only: it cannot verify these and decides nothing on them.
+        user = connection.user
+        params["ha_user_id"] = str(user.id)[:128]
+        if user.name:
+            params["ha_user_name"] = str(user.name)[:100]
+    try:
+        result = await client.async_claim(method, params)
+    except RpcError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+        return
+    connection.send_result(msg["id"], {**result, "token": token})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/panel/claim/lookup", vol.Required("entry_id"): str, vol.Required("link"): str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def claim_lookup(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Whose claim link is this? Decides nothing: the panel asks the admin before anything is approved."""
+    await _claim_call(hass, connection, msg, "claim.lookup")
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/panel/claim/approve", vol.Required("entry_id"): str, vol.Required("token"): str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def claim_approve(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Make the link's account the owner of this home. The box offers a new install secret with it,
+    written down first; the browser never sees it (`HearthClient._approve`)."""
+    await _claim_call(hass, connection, msg, "claim.approve")
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/panel/claim/decline", vol.Required("entry_id"): str, vol.Required("token"): str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def claim_decline(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Refuse it. The hub spends the link, so it cannot be tried again on another box."""
+    await _claim_call(hass, connection, msg, "claim.decline")

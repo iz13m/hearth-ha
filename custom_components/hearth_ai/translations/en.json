@@ -3,10 +3,17 @@
     "step": {
       "user": {
         "title": "Connect to Azka",
-        "description": "Paste the pairing token from your Azka dashboard. The integration will open an outbound connection to Azka; no ports need to be forwarded.",
+        "description": "Leave the pairing token empty to connect this home to Azka now; you then make it yours in the Azka panel in the sidebar, by pasting the claim link from the Azka app. Only paste a link from your own Azka app, or from someone in your household's own app. Azka never asks you for one. Approve only an email you recognise. If you were given a pairing token, paste it instead. The integration opens an outbound connection to Azka; no ports need to be forwarded.",
         "data": {
-          "pairing_token": "Pairing token",
+          "pairing_token": "Pairing token (optional)",
           "hub_url": "Azka URL"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Connect this home to Azka again",
+        "description": "Azka no longer has this home: nobody claimed it in time, its owner said in the Azka app that it is not theirs, or it was removed. Submit to connect it again, then claim it in the Azka panel in the sidebar by pasting the claim link from the Azka app. Only paste a link from your own Azka app, or from someone in your household's own app. Azka never asks you for one. Approve only an email you recognise. If you were given a pairing token, paste it instead.",
+        "data": {
+          "pairing_token": "Pairing token (optional)"
         }
       }
     },
@@ -14,10 +21,18 @@
       "invalid_token": "That pairing token is invalid or has expired. Generate a new one in the Azka dashboard.",
       "invalid_url": "The Azka URL must start with https://",
       "rate_limited": "Too many attempts. Wait a minute and try again.",
-      "cannot_connect": "Could not reach Azka. Check the URL and your internet connection."
+      "cannot_connect": "Could not reach Azka. Check the URL and your internet connection.",
+      "register_unsupported": "This Azka server cannot connect a home without a pairing token. Paste a pairing token, or check the Azka URL.",
+      "hub_full": "Azka is not accepting new homes right now. Try again later.",
+      "register_rate_limited": "Too many homes were connected from this network recently. Azka allows five an hour; try again later.",
+      "register_invalid": "Azka could not read this Home Assistant's details. Update the Azka AI integration and try again."
     },
     "abort": {
-      "already_configured": "This Azka installation is already configured."
+      "already_configured": "This Azka installation is already configured.",
+      "reauth_successful": "Connected to Azka again."
+    },
+    "create_entry": {
+      "unclaimed": "This home is connected to Azka but belongs to nobody yet. Open Azka in the sidebar and paste the claim link from the Azka app soon: Azka forgets a home nobody claims, after 30 minutes, or after a day once a claim link has been checked. Only paste a link from your own Azka app, or from someone in your household's own app. Azka never asks you for one. Approve only an email you recognise."
     }
   },
   "options": {

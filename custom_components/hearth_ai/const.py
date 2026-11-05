@@ -27,6 +27,35 @@ CONF_WS_URL = "ws_url"
 
 DEFAULT_HUB_URL = "https://app.example.com"
 
+# --- Claiming a home (AgDR-0064): a mirror of `claim` in packages/shared/schema/methods.json,
+# pinned by tests/test_claim.py. Never imported from the Node side at runtime.
+# A box that registered without a pairing token stores `claimed: False` until an HA admin approves a
+# claim in the panel. An entry with no `claimed` key was paired with a token, and is claimed.
+CONF_CLAIMED = "claimed"
+CONF_UNCLAIMED_EXPIRES_AT = "unclaimed_expires_at"
+# Who approved claim became the owner, as the hub named them in `claim.approve`'s answer. Shown by the
+# panel; the hub has no method that reports a claimed home's owner, so a token-paired home has none.
+CONF_OWNER_EMAIL = "owner_email"
+# False while a home claimed through the panel waits for its owner to confirm it in the app, as the
+# last hello said. Kept so a restart does not start out believing an unconfirmed home is live.
+# Absent means confirmed (every token-paired entry, and every hub older than the confirmation).
+CONF_CONFIRMED = "confirmed"
+UNCLAIMED_HA_TO_HUB_METHODS: frozenset[str] = frozenset({"hello", "claim.lookup", "claim.approve", "claim.decline"})
+CLAIM_TOKEN_PATTERN = r"hhc_[A-Za-z0-9_-]{22}"
+CLAIM_LINK_PREFIX = "hearth://claim/"
+# What `claim.approve`'s `new_secret` must look like: the box makes its own next secret in the
+# shape the hub mints them.
+INSTALL_SECRET_PATTERN = r"his_[A-Za-z0-9_-]{43}"
+CLAIMED_CLOSE_CODE = 4010
+UNCLAIMED_EXPIRED_CLOSE_CODE = 4011
+# The owner confirmed a claimed home in the app: reconnect on the same secret, and the home is live.
+CLAIM_CONFIRMED_CLOSE_CODE = 4012
+# The hub deleted this installation: a live home its owner removed, or a claimed home whose owner
+# answered "not my home" in the app. Its secret is dead; only registering again helps. Pinned to
+# `claim.installation_removed_close_code` in the shared schema by tests/test_claim.py.
+INSTALLATION_REMOVED_CLOSE_CODE = 4003
+CLAIM_TIMEOUT_S = 15
+
 # Wire-level limits; must match packages/shared/src/envelope.ts
 MAX_FRAME_BYTES = 1_000_000
 HEARTBEAT_TIMEOUT_S = 90
