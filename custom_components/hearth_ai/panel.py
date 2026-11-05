@@ -29,8 +29,10 @@ from .presentation import ROUTINE_DOMAINS, ProfileError, async_load, async_save,
 _LOGGER = logging.getLogger(__name__)
 
 PANEL_URL = "/hearth_ai_panel"
+# The sidebar **path** is a URL the owner may have bookmarked and a dashboard may link to, so it
+# keeps `hearth` like every other identifier; only the title a person reads changes (AgDR-0063).
 PANEL_PATH = "hearth"
-PANEL_TITLE = "Hearth"
+PANEL_TITLE = "Azka"
 PANEL_ICON = "mdi:fireplace"
 # The custom element the bundle defines. Versioned in the URL so a browser that cached yesterday's
 # panel does not keep serving it after an update.

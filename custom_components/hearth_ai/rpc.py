@@ -185,12 +185,12 @@ class Dispatcher:
             raise RpcError("method_not_allowed", f"method not allowed: {method}")
         cap = CAPABILITY_FOR_METHOD[method]
         if self._capabilities is not None and cap not in self._capabilities:
-            raise RpcError("method_not_allowed", f"{cap} is disabled in the Hearth AI options")
+            raise RpcError("method_not_allowed", f"{cap} is disabled in the Azka AI options")
         # Live video is strictly more than a still, and the list of cameras it draws from comes from
         # `vision.list`. "Live on, stills off" is a state nobody designed for, so it is refused here
         # rather than left to produce something stranger further in (AgDR-0045).
         if cap == "vision.live" and self._capabilities is not None and "vision.view" not in self._capabilities:
-            raise RpcError("method_not_allowed", "vision.live needs vision.view, which is disabled in the Hearth AI options")
+            raise RpcError("method_not_allowed", "vision.live needs vision.view, which is disabled in the Azka AI options")
         handler = self._handlers.get(method)
         if handler is None:
             raise RpcError("method_not_allowed", f"method not implemented: {method}")

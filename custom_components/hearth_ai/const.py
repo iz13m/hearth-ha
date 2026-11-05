@@ -1,4 +1,4 @@
-"""Constants for the Hearth AI integration."""
+"""Constants for the Azka AI integration."""
 
 from __future__ import annotations
 
@@ -9,6 +9,15 @@ DOMAIN = "hearth_ai"
 # Read from the manifest (loaded in an executor at import time) so the version we report to the
 # hub can never drift from the version HACS installed.
 INTEGRATION_VERSION: str = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))["version"]
+
+# What Devices & services shows for this entry. Home Assistant stores the title when the entry is
+# created and never re-reads `manifest.json` for it, so a rename of the manifest alone would leave
+# every already-paired home reading "Hearth AI" forever while new ones read "Azka AI" — and every
+# instruction of the form "Settings -> Devices & services -> <name> -> Configure" would then have
+# no single correct value. `async_setup_entry` migrates the old default; see there for why only
+# the default (AgDR-0063).
+ENTRY_TITLE = "Azka AI"
+LEGACY_ENTRY_TITLE = "Hearth AI"
 
 CONF_HUB_URL = "hub_url"
 CONF_PAIRING_TOKEN = "pairing_token"

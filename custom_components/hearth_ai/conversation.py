@@ -14,13 +14,13 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SIGNAL_STATUS, HearthConfigEntry, device_info
 from .client import HearthClient
-from .const import CHAT_TIMEOUT_S
+from .const import CHAT_TIMEOUT_S, DOMAIN
 from .rpc import RpcError
 
 _LOGGER = logging.getLogger(__name__)
 
-OFFLINE_TEXT = "Hearth is not connected right now. Please check the Hearth AI integration."
-ERROR_TEXT = "Sorry, Hearth could not process that request."
+OFFLINE_TEXT = "Azka is not connected right now. Please check the Azka AI integration."
+ERROR_TEXT = "Sorry, Azka could not process that request."
 
 
 async def async_setup_entry(
@@ -37,7 +37,7 @@ class HearthConversationEntity(conversation.ConversationEntity):
     """Conversation entity backed by the Hearth hub."""
 
     _attr_has_entity_name = False
-    _attr_name = "Hearth AI"  # -> conversation.hearth_ai
+    _attr_name = "Azka AI"
     _attr_supports_streaming = False
 
     def __init__(self, entry: ConfigEntry, client: HearthClient) -> None:
@@ -45,6 +45,10 @@ class HearthConversationEntity(conversation.ConversationEntity):
         self._client = client
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = device_info(entry)
+        # `conversation.hearth_ai` was derived from the display name, which is now Azka AI. Pinned
+        # to the domain so a new install lands on the same id every existing home already has, and
+        # an owner's automation naming this agent keeps working (AgDR-0063).
+        self.entity_id = f"conversation.{DOMAIN}"
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:

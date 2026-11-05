@@ -11,6 +11,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.setup import async_setup_component
 
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+
 from custom_components.hearth_ai import SIGNAL_STATUS
 from custom_components.hearth_ai.const import DOMAIN
 
@@ -67,3 +69,28 @@ async def test_disabled_at_setup_never_connects(hass: HomeAssistant) -> None:
         await _setup(hass, {"connection_enabled": False})
     assert not start.called
     assert hass.states.get(SWITCH).state == "off"
+
+
+async def test_the_ids_do_not_follow_the_display_name(hass: HomeAssistant) -> None:
+    """The rename is brand-only: an owner reads Azka, their automations still name `hearth_ai`.
+
+    Both halves are asserted here on purpose. `has_entity_name` builds an object id out of the
+    **device** name, so a display name of "Azka AI" and an id of `switch.hearth_ai_connection` can
+    only both be true while the `entity_id` preset in each platform is doing the work. Assert only
+    the ids and this test goes green again the moment someone undoes the rename instead of the pin
+    — which is the failure it exists to catch (AgDR-0063).
+    """
+    entry = await _setup(hass)
+
+    device = dr.async_get(hass).async_get_device_by_identifier((DOMAIN, entry.entry_id), entry.entry_id)
+    assert device is not None
+    assert device.name == "Azka AI"
+    assert device.manufacturer == "Azka"
+
+    registry = er.async_get(hass)
+    assert registry.async_get(SWITCH) is not None
+    assert registry.async_get(SENSOR) is not None
+    assert registry.async_get("conversation.hearth_ai") is not None
+
+    # Nothing anywhere derived an id from the new name.
+    assert [e for e in hass.states.async_entity_ids() if "azka" in e] == []

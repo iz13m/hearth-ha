@@ -12,7 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.start import async_at_started
 
 from .client import HearthClient
-from .const import CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN, INTEGRATION_VERSION
+from .const import CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN, ENTRY_TITLE, INTEGRATION_VERSION, LEGACY_ENTRY_TITLE
 from .labels import async_ensure_labels
 from .options import HearthOptions
 from .panel import async_register_panel, async_unregister_panel
@@ -34,11 +34,21 @@ type HearthConfigEntry = ConfigEntry[HearthData]
 
 def device_info(entry: ConfigEntry) -> dr.DeviceInfo:
     """One device groups the connection switch, connectivity sensor, and conversation agent."""
-    return dr.DeviceInfo(identifiers={(DOMAIN, entry.entry_id)}, name="Hearth AI", manufacturer="Hearth", entry_type=dr.DeviceEntryType.SERVICE)
+    # The name is what the owner reads on the device page, so it is Azka; the entity ids under it
+    # are pinned to `DOMAIN` in each platform and do not follow it (AgDR-0063).
+    return dr.DeviceInfo(identifiers={(DOMAIN, entry.entry_id)}, name="Azka AI", manufacturer="Azka", entry_type=dr.DeviceEntryType.SERVICE)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bool:
     """Set up from a config entry (re-run on every options change via OptionsFlowWithReload)."""
+    # Devices & services reads the stored entry title, not `manifest.json`, so the brand rename
+    # reaches an already-paired home only if we move it here (AgDR-0063). **Only the old default
+    # is migrated**: the title is also what the owner types when they rename the entry themselves,
+    # and overwriting that would be this change reaching into their home to undo their own edit.
+    # A home that renamed it to exactly "Hearth AI" is indistinguishable from an untouched one and
+    # gets the new name; that is the one case this cannot separate, and it is harmless.
+    if entry.title == LEGACY_ENTRY_TITLE:
+        hass.config_entries.async_update_entry(entry, title=ENTRY_TITLE)
     # Before the client: the first `entities.list` after connecting should already know the labels,
     # and the first `presentation.get` should not be the thing that reads the arrangement off disk.
     await async_ensure_labels(hass)

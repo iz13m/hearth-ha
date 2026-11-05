@@ -124,6 +124,9 @@ async def test_assistant_step_live_and_offline(hass: HomeAssistant, entry: MockC
     model_field = next(k for k in result["data_schema"].schema if str(k) == "model")
     offered = [o["value"] for o in result["data_schema"].schema[model_field].config["options"]]
     assert offered == ["", "claude-opus-5", "claude-sonnet-5"]
+    # The "use the hub's default" choice is read in the owner's own options screen (AgDR-0063).
+    labels = [o["label"] for o in result["data_schema"].schema[model_field].config["options"]]
+    assert labels[0] == "Azka default (claude-opus-5)"
     with patch("custom_components.hearth_ai.HearthClient.start"):
         result = await hass.config_entries.options.async_configure(result["flow_id"], {"assistant_mode": "byo", "model": ""})
         await hass.async_block_till_done()

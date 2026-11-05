@@ -51,12 +51,12 @@ ordinary Home Assistant label rather than a flag in Hearth's own storage.
 ALL_LABELS: dict[str, str] = {**ROLES, **ROUTINE_ROLES}
 
 DESCRIPTIONS: dict[str, str] = {
-    "tile": "Hearth app: show this as its own tile. A setting stays an admin's to change.",
-    "read_only": "Hearth app: show this, but nobody can change it from the app.",
-    "setting": "Hearth app: treat this as one of its device's settings, changed by admins only.",
-    "diagnostic": "Hearth app: treat this as a reading about its device, never changed from the app.",
-    "hide": "Hearth app: do not show this in the app. Assistants still see what Assist shares.",
-    "scene": "Hearth app: show this script in Scenes. A scene with steps or a schedule is a script.",
+    "tile": "Azka app: show this as its own tile. A setting stays an admin's to change.",
+    "read_only": "Azka app: show this, but nobody can change it from the app.",
+    "setting": "Azka app: treat this as one of its device's settings, changed by admins only.",
+    "diagnostic": "Azka app: treat this as a reading about its device, never changed from the app.",
+    "hide": "Azka app: do not show this in the app. Assistants still see what Assist shares.",
+    "scene": "Azka app: show this script in Scenes. A scene with steps or a schedule is a script.",
 }
 ICON = "mdi:home-heart"
 

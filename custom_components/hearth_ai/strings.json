@@ -2,44 +2,44 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Hearth",
-        "description": "Paste the pairing token from your Hearth dashboard. The integration will open an outbound connection to Hearth; no ports need to be forwarded.",
+        "title": "Connect to Azka",
+        "description": "Paste the pairing token from your Azka dashboard. The integration will open an outbound connection to Azka; no ports need to be forwarded.",
         "data": {
           "pairing_token": "Pairing token",
-          "hub_url": "Hearth URL"
+          "hub_url": "Azka URL"
         }
       }
     },
     "error": {
-      "invalid_token": "That pairing token is invalid or has expired. Generate a new one in the Hearth dashboard.",
-      "invalid_url": "The Hearth URL must start with https://",
+      "invalid_token": "That pairing token is invalid or has expired. Generate a new one in the Azka dashboard.",
+      "invalid_url": "The Azka URL must start with https://",
       "rate_limited": "Too many attempts. Wait a minute and try again.",
-      "cannot_connect": "Could not reach Hearth. Check the URL and your internet connection."
+      "cannot_connect": "Could not reach Azka. Check the URL and your internet connection."
     },
     "abort": {
-      "already_configured": "This Hearth installation is already configured."
+      "already_configured": "This Azka installation is already configured."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Hearth AI settings",
+        "title": "Azka AI settings",
         "menu_options": {
-          "connection": "Connection to Hearth",
+          "connection": "Connection to Azka",
           "capabilities": "What the AI may access",
           "assistant": "Assistant mode and model"
         }
       },
       "connection": {
-        "title": "Connection to Hearth",
-        "description": "Installation {installation_id} at {hub_url} is currently {status}. Turning the connection off closes the outbound link immediately; nothing can reach this Home Assistant until you turn it back on. The connection switch entity does the same. Hearth also adds five labels to Home Assistant (Hearth: tile, read only, setting, diagnostic, hide). Put them on an entity or device to choose how the Hearth app shows it; they change nothing for an AI, which still sees exactly what is exposed to Assist.",
+        "title": "Connection to Azka",
+        "description": "Installation {installation_id} at {hub_url} is currently {status}. Turning the connection off closes the outbound link immediately; nothing can reach this Home Assistant until you turn it back on. The connection switch entity does the same. Azka also adds five labels to Home Assistant (Hearth: tile, read only, setting, diagnostic, hide). Put them on an entity or device to choose how the Azka app shows it; they change nothing for an AI, which still sees exactly what is exposed to Assist.",
         "data": {
-          "connection_enabled": "Connect to Hearth"
+          "connection_enabled": "Connect to Azka"
         }
       },
       "capabilities": {
         "title": "What the AI may access",
-        "description": "Each switch grants the AI (your own AI client through the Hearth connector, and the Managed assistant) one area. Reads never change anything. Writes create, edit, and delete items the same way the Home Assistant editor does. Some of these let it act on your home immediately, or read more than a current state does; those are off until you turn them on. On top of all of this, only entities exposed to Assist (Settings → Voice assistants → Expose) are ever visible, and locks, alarms, cameras, and location entities are never accessible.",
+        "description": "Each switch grants the AI (your own AI client through the Azka connector, and the Managed assistant) one area. Reads never change anything. Writes create, edit, and delete items the same way the Home Assistant editor does. Some of these let it act on your home immediately, or read more than a current state does; those are off until you turn them on. On top of all of this, only entities exposed to Assist (Settings → Voice assistants → Expose) are ever visible, and locks, alarms, cameras, and location entities are never accessible.",
         "data": {
           "cap_entities_read": "Read entities, states, and areas",
           "cap_entities_subscribe": "Push device state as it changes (instead of waiting to be asked)",
@@ -58,30 +58,30 @@
           "cap_routines_run": "Activate scenes and run scripts you already created",
           "cap_integrations_manage": "Add and set up new integrations (devices, services)",
           "cap_areas_manage": "Arrange rooms and floors, and which room each device is in",
-          "cap_entities_manage": "Choose which devices Hearth can see",
-          "cap_access_control": "Lock and unlock your doors from the Hearth app",
-          "cap_vision_view": "See your cameras from the Hearth app",
-          "cap_vision_live": "Watch a camera live in the Hearth app"
+          "cap_entities_manage": "Choose which devices Azka can see",
+          "cap_access_control": "Lock and unlock your doors from the Azka app",
+          "cap_vision_view": "See your cameras from the Azka app",
+          "cap_vision_live": "Watch a camera live in the Azka app"
         },
         "data_description": {
           "cap_entities_subscribe": "Sends the state of entities you already exposed as soon as they change, so a light switched at the wall shows up in the app in about a second instead of up to five. It reveals nothing new — those same states were already being read every few seconds.",
           "cap_entities_history": "Lets it look up what one entity has been reading in the past — the individual readings your recorder still holds, usually the last ten days or so, and the hourly and daily minimum, maximum and average Home Assistant keeps for much longer — so it can write an automation around what actually happens here instead of guessing. One entity at a time, only entities you have exposed to Assist, never a lock, alarm, camera or location entity, and never their attributes. It is a separate switch because history says more than a current reading does: a month of it shows when the house is usually empty and when people are up.",
           "cap_helpers_manage": "Lets it make the small building blocks an automation needs — a toggle to turn a routine on and off, a timer, a counter, a schedule, or a sensor derived from ones you already have, such as a trend, a threshold, or a template. It can also rename and delete the helpers in your home. Separate from adding integrations, because that one is about connecting new devices and can ask for passwords, while this one is everyday. Deleting a helper breaks any automation that used it, and what a helper may act on or read is limited exactly as everywhere else: never a lock, alarm, camera or location entity.",
-          "cap_labels_manage": "Lets it tag entities with Home Assistant labels — “holiday”, “upstairs lights” — and sort your automations, scripts and scenes into categories, so it can act on a set of things that is not a room and keep a growing list tidy. It can only label what it can already see, and Hearth's own five labels (Hearth: tile, read only, setting, diagnostic, hide), which decide how the app shows a device, are refused: those stay yours to set in Home Assistant.",
+          "cap_labels_manage": "Lets it tag entities with Home Assistant labels — “holiday”, “upstairs lights” — and sort your automations, scripts and scenes into categories, so it can act on a set of things that is not a room and keep a growing list tidy. It can only label what it can already see, and Azka's own five labels (Hearth: tile, read only, setting, diagnostic, hide), which decide how the app shows a device, are refused: those stay yours to set in Home Assistant.",
           "cap_notify_send": "Lets it tell someone something now — “the washing is done” — and see which phones and other targets this home can notify, which Home Assistant does not share with an assistant by default. Writing an automation that notifies you has always been possible; this is for sending one there and then, and for knowing who can be told. Limited to ten a minute, so a mistake cannot become a night of buzzing, and it can only use targets you have already set up.",
           "cap_devices_control": "Lets it act on your home as you speak, for example \"turn on the kitchen lights\". Locks, alarms, and cameras stay blocked.",
-          "cap_routines_run": "A script does whatever you wrote in it, which may include actions Hearth itself is not allowed to perform. Enable this only if you trust your own scripts.",
+          "cap_routines_run": "A script does whatever you wrote in it, which may include actions Azka itself is not allowed to perform. Enable this only if you trust your own scripts.",
           "cap_integrations_manage": "Lets it search integrations and walk through setup, filling things like IP addresses. It will never send a password, API key, or token: those steps are handed back for you to finish in Home Assistant.",
-          "cap_areas_manage": "Lets the Hearth app create, rename and delete areas and floors here, change which floor an area is on, and put a device in an area — for its admins only, never for the AI. Deleting an area works as it does in Home Assistant: whatever was in it is left in no area, and automations or dashboards that named it will need updating.",
-          "cap_entities_manage": "Lets the Hearth app share a device with Assist, or stop sharing it, so a newly added device can be used without coming back here. It can only offer devices Hearth is allowed to work with: locks, cameras, alarms and location entities are never listed and can never be shared. Sharing a device makes it visible to everything Hearth can do, including the assistant.",
-          "cap_access_control": "Lets the Hearth app work a lock — and only the app. The AI never sees this: locks stay refused for your own AI client and the Managed assistant, and a lock written into an automation, scene or script is still rejected. Separate from device control on purpose, so turning on “act on my home” never quietly meant “open my front door”. If a lock asks for a code, set a default code on it in Home Assistant — Hearth never carries one.",
-          "cap_vision_view": "Lets the Hearth app show a still picture from a camera — and only the app, only to people you have given that camera in the app. The AI never sees this: cameras stay hidden from your own AI client and the Managed assistant, and a camera written into an automation, scene or script is still rejected. Pictures are made small and sent without the camera's hidden details, such as where it is. This switch never shows live video: that is a separate one below, and off until you turn it on.",
-          "cap_vision_live": "Lets someone you have given a camera watch it live, rather than a picture every few seconds. Needs the switch above as well. Three things are worth knowing before you turn it on. The video goes straight from your home to the phone and never through Hearth, which means the phone and your home have to learn each other's internet addresses to find a path. If they cannot find one, the video travels through a relay — your own if your Home Assistant provides one, otherwise Hearth's — which carries it without being able to see it. And it is video only, never sound. The AI still never sees a camera, live or still."
+          "cap_areas_manage": "Lets the Azka app create, rename and delete areas and floors here, change which floor an area is on, and put a device in an area — for its admins only, never for the AI. Deleting an area works as it does in Home Assistant: whatever was in it is left in no area, and automations or dashboards that named it will need updating.",
+          "cap_entities_manage": "Lets the Azka app share a device with Assist, or stop sharing it, so a newly added device can be used without coming back here. It can only offer devices Azka is allowed to work with: locks, cameras, alarms and location entities are never listed and can never be shared. Sharing a device makes it visible to everything Azka can do, including the assistant.",
+          "cap_access_control": "Lets the Azka app work a lock — and only the app. The AI never sees this: locks stay refused for your own AI client and the Managed assistant, and a lock written into an automation, scene or script is still rejected. Separate from device control on purpose, so turning on “act on my home” never quietly meant “open my front door”. If a lock asks for a code, set a default code on it in Home Assistant — Azka never carries one.",
+          "cap_vision_view": "Lets the Azka app show a still picture from a camera — and only the app, only to people you have given that camera in the app. The AI never sees this: cameras stay hidden from your own AI client and the Managed assistant, and a camera written into an automation, scene or script is still rejected. Pictures are made small and sent without the camera's hidden details, such as where it is. This switch never shows live video: that is a separate one below, and off until you turn it on.",
+          "cap_vision_live": "Lets someone you have given a camera watch it live, rather than a picture every few seconds. Needs the switch above as well. Three things are worth knowing before you turn it on. The video goes straight from your home to the phone and never through Azka, which means the phone and your home have to learn each other's internet addresses to find a path. If they cannot find one, the video travels through a relay — your own if your Home Assistant provides one, otherwise Azka's — which carries it without being able to see it. And it is video only, never sound. The AI still never sees a camera, live or still."
         }
       },
       "assistant": {
         "title": "Assistant mode and model",
-        "description": "Hearth subscription: {plan} (active: {active}, renews {period_end}). Subscribe or manage it in the Hearth app.\n\n**Managed** answers inside Home Assistant Assist using the Hearth subscription. **Bring your own AI** means you talk to Claude, ChatGPT, or Gemini directly and add this connector to it: {mcp_url} (see the dashboard for setup steps). **Off** removes the in-HA assistant. Model list: {models_source}.",
+        "description": "Azka subscription: {plan} (active: {active}, renews {period_end}). Subscribe or manage it in the Azka app.\n\n**Managed** answers inside Home Assistant Assist using the Azka subscription. **Bring your own AI** means you talk to Claude, ChatGPT, or Gemini directly and add this connector to it: {mcp_url} (see the dashboard for setup steps). **Off** removes the in-HA assistant. Model list: {models_source}.",
         "data": {
           "assistant_mode": "Assistant mode",
           "model": "Model for the Managed assistant"
@@ -90,14 +90,14 @@
     },
     "error": {
       "invalid_model": "That model is not available on your plan.",
-      "cannot_connect": "Could not reach Hearth."
+      "cannot_connect": "Could not reach Azka."
     }
   },
   "selector": {
     "assistant_mode": {
       "options": {
-        "managed": "Managed (Hearth subscription, chat inside Home Assistant)",
-        "byo": "Bring your own AI (Claude / ChatGPT / Gemini via the Hearth connector)",
+        "managed": "Managed (Azka subscription, chat inside Home Assistant)",
+        "byo": "Bring your own AI (Claude / ChatGPT / Gemini via the Azka connector)",
         "off": "Off (no assistant in Home Assistant)"
       }
     }

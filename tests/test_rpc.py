@@ -57,5 +57,8 @@ async def test_capability_gate(hass) -> None:
         await d.dispatch("automations.create", {"config": {}})
     assert ei.value.code == "method_not_allowed"
     assert "disabled" in ei.value.message
+    # It names the options screen the owner can find, which is under the integration's display
+    # name, not under the old brand (AgDR-0063).
+    assert ei.value.message == "automations.write is disabled in the Azka AI options"
     # None = everything (legacy / tests)
     assert await Dispatcher(hass).dispatch("areas.list", {}) if False else True

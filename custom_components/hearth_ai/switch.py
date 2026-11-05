@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import HearthConfigEntry, device_info
-from .const import OPT_CONNECTION_ENABLED
+from .const import DOMAIN, OPT_CONNECTION_ENABLED
 
 
 async def async_setup_entry(
@@ -33,6 +33,14 @@ class HearthConnectionSwitch(SwitchEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_connection"
         self._attr_device_info = device_info(entry)
+        # The id follows the **domain**, which never changes, not the device's display name, which
+        # did (AgDR-0063). With `has_entity_name`, Home Assistant builds the object id out of the
+        # device name, so renaming the device to "Azka AI" would have given a *new* install
+        # `switch.azka_ai_connection` while every existing home kept the old id — two populations
+        # with different ids for the same entity, and owners' automations name this one.
+        # Setting `entity_id` before the entity is added is Home Assistant's own way to say so: it
+        # becomes the suggested object id, which the registry does not prefix with the device name.
+        self.entity_id = f"switch.{DOMAIN}_connection"
 
     @property
     def is_on(self) -> bool:

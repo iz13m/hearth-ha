@@ -1,6 +1,6 @@
 {
   "domain": "hearth_ai",
-  "name": "Hearth AI",
+  "name": "Azka AI",
   "after_dependencies": [
     "automation",
     "frontend",

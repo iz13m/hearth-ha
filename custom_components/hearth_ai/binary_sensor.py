@@ -11,6 +11,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SIGNAL_STATUS, HearthConfigEntry, device_info
+from .const import DOMAIN
 
 
 async def async_setup_entry(
@@ -31,6 +32,8 @@ class HearthConnectedSensor(BinarySensorEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_connected"
         self._attr_device_info = device_info(entry)
+        # Pinned to the domain rather than to the device's display name — see the switch for why.
+        self.entity_id = f"binary_sensor.{DOMAIN}_connected"
 
     @property
     def is_on(self) -> bool:

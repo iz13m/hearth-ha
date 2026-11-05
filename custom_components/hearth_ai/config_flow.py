@@ -20,6 +20,7 @@ from .const import (
     CONF_WS_URL,
     DEFAULT_HUB_URL,
     DOMAIN,
+    ENTRY_TITLE,
     INTEGRATION_VERSION,
 )
 
@@ -54,7 +55,7 @@ class HearthConfigFlow(ConfigFlow, domain=DOMAIN):
                     await self.async_set_unique_id(result["installation_id"])
                     self._abort_if_unique_id_configured()
                     return self.async_create_entry(
-                        title="Hearth AI",
+                        title=ENTRY_TITLE,
                         data={
                             CONF_HUB_URL: hub_url,
                             CONF_INSTALLATION_ID: result["installation_id"],
@@ -189,7 +190,7 @@ class HearthOptionsFlow(OptionsFlowWithReload):
             else:
                 return self._save({OPT_ASSISTANT_MODE: user_input[OPT_ASSISTANT_MODE], OPT_MODEL: model})
         hub_url = str(self.config_entry.data.get(CONF_HUB_URL, "")).rstrip("/")
-        model_options = [SelectOptionDict(value="", label=f"Hearth default ({account.get('default_model', DEFAULT_MODEL)})")] + [
+        model_options = [SelectOptionDict(value="", label=f"Azka default ({account.get('default_model', DEFAULT_MODEL)})")] + [
             SelectOptionDict(value=m, label=m) for m in models
         ]
         schema = vol.Schema(
