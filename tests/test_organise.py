@@ -316,6 +316,34 @@ async def test_a_category_only_takes_its_own_kind(core: HomeAssistant) -> None:
     assert "not a automation" in ei.value.message
 
 
+async def test_a_wrong_kind_later_in_the_list_files_nothing(core: HomeAssistant) -> None:
+    """#653: a refused call changes nothing, wherever in the list the wrong kind sits.
+
+    The kind was checked inside the write loop, so `[automation.a, script.b]` filed `automation.a`
+    and then refused the call: the model was told it failed when half of it applied. The control is
+    the same call without the script, which files the automation.
+    """
+    automation = _entity(core, "automation", "a", expose=False)
+    script = _entity(core, "script", "b", expose=False)
+    d = build_dispatcher(core, CAPS)
+    made = await d.dispatch("categories.create", {"scope": "automation", "name": "Lighting"})
+
+    def assign(*ids: str):
+        params = {"scope": "automation", "category_id": made["category_id"], "entity_ids": list(ids)}
+        return d.dispatch("categories.assign", params)
+
+    with pytest.raises(RpcError) as ei:
+        await assign(automation, script)
+    assert (ei.value.code, ei.value.message) == (
+        "invalid_params",
+        f"{script} is not a automation, so it cannot go in a automation category",
+    )
+    assert not er.async_get(core).async_get(automation).categories
+
+    assert (await assign(automation))["changed"] == [automation]
+    assert er.async_get(core).async_get(automation).categories == {"automation": made["category_id"]}
+
+
 async def test_deleting_a_category_empties_it_without_deleting_what_was_in_it(core: HomeAssistant) -> None:
     automation = _entity(core, "automation", "hall_at_sunset", expose=False)
     d = build_dispatcher(core, CAPS)

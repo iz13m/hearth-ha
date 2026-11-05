@@ -280,12 +280,16 @@ async def categories_assign(hass: HomeAssistant, params: dict[str, Any]) -> dict
         if cr.async_get(hass).async_get_category(scope=scope, category_id=category_id) is None:
             raise RpcError("not_found", f"no {scope} category {category_id}")
     entity_ids = _targets(hass, params)
+    # Every id is checked before the first write, as `_targets` does, so a refusal means nothing was
+    # filed. Checked inside the loop, a wrong kind later in the list refused the call after the ids
+    # before it had already moved (#653).
+    for entity_id in entity_ids:
+        if entity_id.split(".", 1)[0] != scope:
+            raise RpcError("invalid_params", f"{entity_id} is not a {scope}, so it cannot go in a {scope} category")
 
     ent_reg = er.async_get(hass)
     changed: list[str] = []
     for entity_id in entity_ids:
-        if entity_id.split(".", 1)[0] != scope:
-            raise RpcError("invalid_params", f"{entity_id} is not a {scope}, so it cannot go in a {scope} category")
         ent = ent_reg.async_get(entity_id)
         categories = dict(ent.categories or {})
         if category_id is None:
