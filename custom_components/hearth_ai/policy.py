@@ -259,7 +259,9 @@ def _positions_of(node: dict[str, Any]) -> list[Any] | None:
         value = node.get(key)
         if value is None:
             continue
-        if not isinstance(value, dict):
+        # A templated key is rendered too, and the later of two equal keys wins, so
+        # `{position: 0, "{{ 'position' }}": 100}` opens the valve to 100.
+        if not isinstance(value, dict) or _has_templated_key(value):
             return None
         if "position" in value:
             out.append(value["position"])
@@ -433,7 +435,7 @@ def _scene_entity_ids(node: dict[str, Any]) -> list[str]:
         elif isinstance(value, list):
             out.extend(x for x in value if isinstance(x, str))
 
-    for src in (node, node.get("data")):
+    for src in (node, node.get("data"), node.get("data_template")):
         if not isinstance(src, dict):
             continue
         entities = src.get("entities")
@@ -441,8 +443,57 @@ def _scene_entity_ids(node: dict[str, Any]) -> list[str]:
             out.extend(str(k) for k in entities)
         else:
             push(entities)
-        push(src.get("snapshot_entities"))
+        # Comma-split like a target's `entity_id`: `cv.entity_ids` splits `"light.a, lock.front_door"`.
+        out.extend(_entity_ids({"entity_id": src.get("snapshot_entities")}))
     return out
+
+
+SCENE_UNSETTABLE_DOMAINS: frozenset[str] = frozenset({"group"}) | ROUTINE_DOMAINS
+"""Domains a scene service may not set or snapshot. Mirror of SCENE_UNSETTABLE_DOMAINS in policy.ts.
+
+A `group.*`'s `reproduce_state` reproduces the group's state on every member, so
+`{entities: {"group.doors": "unlocked"}}` calls `lock.unlock` on each lock in it, and `group.set` can
+build that group from a template. An `automation.*`, `script.*` or `scene.*` key turns the routine on
+or off, which `DENIED_ACTIONS` and the routine rules keep from an authored config.
+"""
+
+
+def _scene_unsettable_violations(ids: list[str], action: str, p: str) -> list[str]:
+    return [
+        f"{p}: action {action} sets {eid}; a scene service may not set or snapshot a group, automation, script or scene, since what that reaches cannot be checked here"
+        for eid in ids
+        if _domain(eid) in SCENE_UNSETTABLE_DOMAINS
+    ]
+
+
+def _scene_template_violations(node: dict[str, Any], action: str, p: str) -> list[str]:
+    """A scene service whose entities are named by a template. Mirror of sceneTemplateViolations.
+
+    `cv.template_complex` and `render_complex` render a mapping's **keys** as well as its values, and
+    `scene.apply` validates each rendered key as an entity id. So `{"{{ 'lo' ~ 'ck.front_door' }}":
+    "unlocked"}` unlocks the door while `_scene_entity_ids` reads the raw key, and an `entities` or
+    `snapshot_entities` that is itself a template renders to whatever it likes. Refused as unknowable,
+    like a templated target (AgDR-0042). A stored scene in `scenes.yaml` is not rendered, so
+    `find_scene_policy_violations` needs none of this.
+    """
+    problems: list[str] = []
+    for src in (node, node.get("data"), node.get("data_template")):
+        if not isinstance(src, dict):
+            continue
+        if "entities" in src:
+            entities = src["entities"]
+            if not isinstance(entities, dict):
+                problems.append(f"{p}: action {action} sets entities that are not a mapping of entity ids; what it would reach cannot be known until it runs")
+            else:
+                for key in entities:
+                    if not isinstance(key, str) or _TEMPLATE_RE.search(key):
+                        problems.append(f"{p}: action {action} sets {key}, which is a template; what it would reach cannot be known until it runs")
+        if "snapshot_entities" in src:
+            snap = src["snapshot_entities"]
+            items = [snap] if isinstance(snap, str) else snap if isinstance(snap, list) else None
+            if items is None or any(not isinstance(x, str) or _TEMPLATE_RE.search(x) for x in items):
+                problems.append(f"{p}: action {action} snapshots entities named by a template; what it would reach cannot be known until it runs")
+    return problems
 
 
 REFERENCEABLE_DENIED_DOMAINS: frozenset[str] = DENIED_ENTITY_DOMAINS | {"image", "image_processing"}
@@ -466,7 +517,19 @@ _REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_/\-])(" + "|".join(sorted(REFERENCEABLE_DENIED_DOMAINS | HOST_SERVICE_DOMAINS)) + r")\.[a-z0-9_]+",
     re.IGNORECASE,
 )
-_TEMPLATE_RE = re.compile(r"\{\{|\{%")
+# Home Assistant's `is_template_string`: `{{`, `{%` **or `{#`**. A Jinja comment renders to nothing,
+# so `lo{# #}ck.unlock` is a template that renders to `lock.unlock` and names no denied domain raw.
+_TEMPLATE_RE = re.compile(r"\{\{|\{%|\{#")
+
+
+def _has_templated_key(value: Any) -> bool:
+    """Whether a mapping has a key Home Assistant will render (`template_complex` renders keys).
+
+    A key that is not a string counts: the second walk in `_validate` reads the config as Home
+    Assistant validated it, where a templated key is already a `Template` object. JSON keys are
+    always strings, so this cannot make the box disagree with `hasTemplatedKey` on a shared case.
+    """
+    return isinstance(value, dict) and any(not isinstance(k, str) or _TEMPLATE_RE.search(k) for k in value)
 
 
 def find_reference_violations(value: Any, path: str = "input") -> list[str]:
@@ -533,7 +596,10 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
                     problems.append(f"{p}: action {action} aimed at {eid} could open a valve; {_VALVE_CLOSING_RULE}")
             if dom == "scene":
                 problems.extend(f"{p}: action {action} could leave {eid} open; a scene may only close a valve" for eid in _scene_valve_ids(node))
-                ids += _scene_entity_ids(node)
+                problems.extend(_scene_template_violations(node, action, p))
+                scene_ids = _scene_entity_ids(node)
+                problems.extend(_scene_unsettable_violations(scene_ids, action, p))
+                ids += scene_ids
             for eid in ids:
                 if _domain(eid) in DENIED_ENTITY_DOMAINS:
                     problems.append(f"{p}: entity {eid} is in denied domain {_domain(eid)}")
@@ -622,9 +688,11 @@ def _target_selection(node: dict[str, Any], action: str) -> tuple[set[str], list
     carriers = ("target",) if _data_is_variables(action) else TARGET_BEARING_KEYS
     for key in carriers:
         value = node.get(key)
-        if isinstance(value, str):
+        # A templated key is rendered like a templated value (`template_complex`), so
+        # `data: {"{{ 'area' ~ '_id' }}": "garden"}` selects an area no key here names.
+        if isinstance(value, str) or _has_templated_key(value):
             unknowable = True
-        elif isinstance(value, dict):
+        if isinstance(value, dict):
             keys.update(str(k) for k in value)
             ids.extend(_entity_ids(value))
     keys.update(k for k in INDIRECT_TARGET_KEYS if k in node)
@@ -686,4 +754,7 @@ def find_scene_policy_violations(config: Any) -> list[str]:
         return []
     return [f"entities.{eid}: denied domain {_domain(eid)}" for eid in entities if _domain(eid) in DENIED_ENTITY_DOMAINS] + [
         f"entities.{eid}: a scene may only close a valve" for eid, v in entities.items() if _domain(eid) == VALVE_DOMAIN and not _valve_state_closes(v)
+    ] + [
+        # A group's `reproduce_state` sets every member, and a stored scene is reproduced the same way.
+        f"entities.{eid}: a scene may not set a group; what its members are cannot be checked here" for eid in entities if _domain(eid) == _GROUP_DOMAIN
     ]

@@ -112,6 +112,9 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
         for eid in members
         if eid.split(".", 1)[0] in DENIED_ENTITY_DOMAINS
     ]
+    # A group's `reproduce_state` sets every member: `group.doors: unlocked` unlocks each lock in it.
+    # The attribute covers a scene with no scenes.yaml entry; the config's keys are checked below.
+    problems += [f"{eid}: a scene that sets a group cannot be activated; what its members are cannot be checked here" for eid in members if eid.split(".", 1)[0].lower() == "group"]
     # A switch a `switch_as_x` helper presents as a lock, siren or valve, any other wrapper on it, and
     # any group over one of those (#643): setting it moves what the gate stands for. The config's own
     # keys count too, in case the attribute is missing.
