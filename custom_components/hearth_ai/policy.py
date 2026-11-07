@@ -175,6 +175,15 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         # ZHA's `warn` and `squawk` device actions call them too, through `DEVICE_ACTION_SERVICES`.
         "zha.warning_device_squawk",
         "zha.warning_device_warn",
+        # #643, ruling 9: an old-style group's members, changed while it runs. `group.set` can add a
+        # lock's relay to a group an automation already turns on, and Hearth reads a group's gate off
+        # its members only when it is asked. Not reachable through `devices.call` on the pinned
+        # 2026.9.3 (its schema takes `object_id` and no `entity_id`); refused for a written config too,
+        # because changing what a group holds is not something a model does. `reload` re-reads the
+        # YAML groups, which undoes nothing a model should be able to undo either.
+        "group.set",
+        "group.remove",
+        "group.reload",
     }
 )
 # A device action whose `type` calls a service by another name (#662), keyed by folded `domain.type`.

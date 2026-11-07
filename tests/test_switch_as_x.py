@@ -604,8 +604,9 @@ async def test_an_old_style_group_over_a_scene_that_sets_the_relay_is_the_lock(c
 
 async def test_group_set_is_not_reachable_through_devices_call(core: HomeAssistant) -> None:
     """Sweep row for ruling 8: `group.set` takes an `object_id` and no `entity_id`, and `devices.call`
-    always sends one, so Home Assistant's schema refuses the call and no membership changes. A group
-    the model could widen this way would still be gated at read time, which is the backstop."""
+    always sends one, so Home Assistant's schema refused the call and no membership changed. Since part
+    B of #643 the three services are in `DENIED_ACTIONS` (ruling 9) and are refused before Home
+    Assistant is asked. A group the model could widen anyway would still be gated at read time."""
     assert await async_setup_component(core, "group", {})
     lamp = await _source(core, "lamp")
     relay = await _source(core, "relay")
@@ -617,7 +618,7 @@ async def test_group_set_is_not_reachable_through_devices_call(core: HomeAssista
 
     for service, data in [("set", {"object_id": "outside", "add_entities": [relay]}), ("remove", {"object_id": "outside"}), ("reload", {})]:
         got = await _err(d.dispatch("devices.call", {"domain": "group", "service": service, "entity_id": ["group.outside"], "data": data}))
-        assert got is not None, service
+        assert got is not None and got[0] == "method_not_allowed" and "not allowed" in got[1], (service, got)
         assert core.states.get("group.outside").attributes["entity_id"] == [lamp], service
 
 

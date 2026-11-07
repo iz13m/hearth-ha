@@ -31,6 +31,7 @@ from homeassistant.helpers import config_validation as cv, entity_registry as er
 from ..const import DOMAIN
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import RpcError
+from .gated import find_gate_violations
 from .resolve import resolve_registry_ids
 from .registry import SWITCH_AS_X, _gates, _source_of, visible
 
@@ -298,6 +299,9 @@ def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     """
     config, problems = resolve_registry_ids(hass, config, "input", any_key=True)
     problems += find_policy_violations(config, "input") + find_reference_violations(config, "input")
+    # Literal, the two above. A form value naming a switch a `switch_as_x` gate covers is a new way to
+    # move it: a group over the relay, or a template switch whose action calls it (#643, ruling 6).
+    problems += find_gate_violations(hass, config, "input", mode="form")
     if problems:
         raise RpcError("validation_failed", "Hearth will not save that: " + "; ".join(problems[:10]))
 

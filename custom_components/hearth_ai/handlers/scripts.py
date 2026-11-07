@@ -33,7 +33,8 @@ from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import GateMap, _exposed, _gates
 from .resolve import resolve_registry_ids
-from .scenes import find_config_violations, find_nested_scene_violations, gated_refusals
+from .gated import find_gate_violations
+from .scenes import _script_raw_config, _script_targets, find_config_violations, find_nested_scene_violations, gated_refusals
 
 _SLUG = re.compile(r"^[a-z0-9_]+$")
 
@@ -233,7 +234,40 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
     # Templated, match-all and indirect targets, which the literal scan above cannot see (ruling 10).
     problems += _selection_refusals(hass, gates, config)
     problems += await find_nested_scene_violations(hass, config)
+    # And what a script it starts can do to a gated relay (#643): a scene that runs `script.turn_on` is
+    # still a scene, and the started script is not checked when it runs (AgDR-0005).
+    problems += _started_script_gate_violations(hass, gates, config)
     return list(dict.fromkeys(problems))
+
+
+def _started_script_gate_violations(hass: HomeAssistant, gates: GateMap, config: Any) -> list[str]:
+    """The `switch_as_x` gate half of `find_nested_script_violations`, over every script a scene-script starts.
+
+    **Only the gate half, and nothing in a home with no gated wrapper.** The authoring check fails closed
+    on a script Home Assistant does not have, a missing blueprint or an unresolved registry id, and runs
+    the literal walk; `script_run_violations` lets those run (AgDR-0044, #663), because at run time
+    the script already exists, is exposed, and `routines.run` gates it. So only what #643 adds is asked
+    here: what each started script moves, and how it selects it (`find_gate_violations`, `nested`). A
+    script that cannot be read, or an id that is not a script, is skipped rather than refused.
+    """
+    if gates.empty:
+        return []
+    problems: list[str] = []
+    checked: set[str] = set()
+    todo = [(entity_id, path) for entity_id, path in _script_targets(config, "config")]
+    while todo:
+        entity_id, path = todo.pop()
+        if entity_id in checked or not entity_id.startswith("script."):
+            continue
+        checked.add(entity_id)
+        raw = _script_raw_config(hass, entity_id)
+        if not isinstance(raw, dict) or "use_blueprint" in raw:
+            continue
+        where = f"{path}->{entity_id}"
+        raw, _unresolved = resolve_registry_ids(hass, raw, where)  # unresolved is allowed at run time, as above
+        problems += find_gate_violations(hass, raw, where, mode="nested", gates=gates)
+        todo += _script_targets(raw, where)
+    return problems
 
 
 async def scripts_get(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:

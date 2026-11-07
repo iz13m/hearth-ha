@@ -932,7 +932,7 @@ def test_every_path_writing_service_is_classified() -> None:
     # everywhere, to everyone".
     ALL_DENIED_ACTIONS = (
         "automation.toggle", "automation.trigger", "automation.turn_off", "automation.turn_on",
-        "downloader.download_file", "homeassistant.reload_all", "homeassistant.reload_config_entry",
+        "downloader.download_file", "group.reload", "group.remove", "group.set", "homeassistant.reload_all", "homeassistant.reload_config_entry",
         "homeassistant.reload_core_config", "homeassistant.restart", "homeassistant.set_location",
         "homeassistant.stop", "homematicip_cloud.dump_hap_config", "isy994.delete_zwave_lock_user_code",
         "isy994.set_zwave_lock_user_code", "local_file.update_file_path", "logger.set_level",

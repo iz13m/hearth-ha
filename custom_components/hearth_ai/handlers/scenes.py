@@ -18,6 +18,7 @@ from homeassistant.helpers import entity_registry as er
 from ..policy import TARGET_BEARING_KEYS, VALVE_DOMAIN, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
+from .gated import find_gate_violations
 from .registry import OFF_LIMITS, GateMap, _exposed, _gates
 from .resolve import resolve_registry_ids
 
@@ -30,8 +31,11 @@ def _entity_id(hass: HomeAssistant, key: str) -> str | None:
     return er.async_get(hass).async_get_entity_id(SCENE_DOMAIN, HOMEASSISTANT_DOMAIN, key)
 
 
-def _validate(config: dict[str, Any]) -> None:
-    if violations := find_scene_policy_violations(config) + find_reference_violations(config, "config"):
+def _validate(hass: HomeAssistant, config: dict[str, Any]) -> None:
+    violations = find_scene_policy_violations(config) + find_reference_violations(config, "config")
+    # A switch a `switch_as_x` helper presents as a lock, siren or valve is a switch to the two above (#643).
+    violations += find_gate_violations(hass, config, mode="scene")
+    if violations:
         raise RpcError("validation_failed", "policy: " + "; ".join(violations))
     try:
         SCENE_PLATFORM_SCHEMA(config)
@@ -180,6 +184,9 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         unresolved
         + find_policy_violations(config)
         + find_reference_violations(config, "config")
+        # The two above are literal: a switch a `switch_as_x` helper presents as a lock, siren or valve
+        # is a switch to them (#643). After registry ids are resolved, so a UUID is checked too.
+        + find_gate_violations(hass, config, mode="authoring")
         + await find_nested_scene_violations(hass, config)
         + await find_nested_script_violations(hass, config)
     )
@@ -281,6 +288,7 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
     """
     problems: list[str] = []
     checked: set[str] = set()
+    gates = _gates(hass)
 
     async def visit(entity_id: str, path: str) -> None:
         if entity_id in checked:  # a script that starts itself, or a diamond
@@ -317,6 +325,9 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         # whether a lock is locked is not reaching a lock: `HIDDEN_DOMAINS` already stops the model
         # learning the state, and the household wrote the condition themselves.
         problems.extend(find_policy_violations(raw, where))
+        # What it can do to a switch a `switch_as_x` gate covers, by the same line (#643): the ids it
+        # moves and how it selects them, not every id it mentions.
+        problems.extend(find_gate_violations(hass, raw, where, mode="nested", gates=gates))
         problems.extend(await find_nested_scene_violations(hass, raw))
         for nested, _ in _script_targets(raw, where):
             await visit(nested, where)
@@ -407,7 +418,7 @@ async def scenes_get(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, A
 
 async def _save(hass: HomeAssistant, key: str, config: dict[str, Any], *, must_exist: bool) -> dict[str, Any]:
     config.pop(CONF_ID, None)
-    _validate({CONF_ID: key, **config})
+    _validate(hass, {CONF_ID: key, **config})
     path = _path(hass)
     async with lock_for(path):
         data = await read_yaml(hass, path, [])

@@ -121,10 +121,12 @@ async def integrations_flow_step(hass: HomeAssistant, params: dict[str, Any]) ->
     check_domain(domain)
 
     check_secrets(hass, flow_id, user_input)
+    # The wrapper's source first, so a lock's relay answers in a ghost's words (ruling 4) rather than
+    # in the form check's (#643).
+    check_switch_as_x_source(hass, domain, user_input)
     # A form field can be an action sequence — Home Assistant's `template` helper takes whole ones,
     # and really runs them — so it is policed like the authoring surface it is (AgDR-0038).
     check_flow_input(hass, user_input)
-    check_switch_as_x_source(hass, domain, user_input)
 
     try:
         async with asyncio.timeout(FLOW_TIMEOUT_S):

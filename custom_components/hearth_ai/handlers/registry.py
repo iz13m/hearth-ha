@@ -220,6 +220,23 @@ class GateMap:
     def __contains__(self, entity_id: str) -> bool:
         return self.get(entity_id) is not None
 
+    def domains(self) -> frozenset[str]:
+        """The domains a gated entity is literally in, where that is not its gate (ruling 2).
+
+        A gated source and its down-flow members, and every wrapper beside them: `switch` in any home
+        with a gate, plus `cover`, `fan` or `light` where such a wrapper sits beside one. A group above
+        them is in a domain already here (a `switch`, `light` or `cover` group holds only its own
+        domain), or in `group`, whose services are refused anyway. Read off the config entries, so it
+        scans nothing.
+        """
+        out: set[str] = set()
+        for seed in self._own:
+            for entity_id in self._same.get(seed, {seed}):
+                domain = entity_id.split(".", 1)[0]
+                if self.get(entity_id) != domain:
+                    out.add(domain)
+        return frozenset(out)
+
     def drives(self, entity_id: str) -> bool:
         """Whether a gate *rests on* this entity: a gated wrapper's source, or something a gated
         group above it hands its gate down to (ruling 9).
