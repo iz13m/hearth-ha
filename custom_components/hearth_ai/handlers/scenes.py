@@ -15,7 +15,7 @@ from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from ..policy import TARGET_BEARING_KEYS, VALVE_DOMAIN, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations
+from ..policy import ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_DOMAIN, _domain, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations, find_scene_write_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
@@ -32,7 +32,9 @@ def _entity_id(hass: HomeAssistant, key: str) -> str | None:
 
 
 def _validate(hass: HomeAssistant, config: dict[str, Any]) -> None:
-    violations = find_scene_policy_violations(config) + find_reference_violations(config, "config")
+    # Plus, at write only, no automation, script or scene key (#713): `find_scene_policy_violations`
+    # alone is also the run-time check, which must keep running the household's own scenes.
+    violations = find_scene_policy_violations(config) + find_scene_write_violations(config) + find_reference_violations(config, "config")
     # A switch a `switch_as_x` helper presents as a lock, siren or valve is a switch to the two above (#643).
     violations += find_gate_violations(hass, config, mode="scene")
     if violations:
@@ -187,7 +189,7 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         # The two above are literal: a switch a `switch_as_x` helper presents as a lock, siren or valve
         # is a switch to them (#643). After registry ids are resolved, so a UUID is checked too.
         + find_gate_violations(hass, config, mode="authoring")
-        + await find_nested_scene_violations(hass, config)
+        + await find_nested_scene_violations(hass, config, authoring=True)
         + await find_nested_script_violations(hass, config)
     )
 
@@ -328,7 +330,8 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         # What it can do to a switch a `switch_as_x` gate covers, by the same line (#643): the ids it
         # moves and how it selects them, not every id it mentions.
         problems.extend(find_gate_violations(hass, raw, where, mode="nested", gates=gates))
-        problems.extend(await find_nested_scene_violations(hass, raw))
+        # Authoring: this walk only runs from `find_config_violations` (#713).
+        problems.extend(await find_nested_scene_violations(hass, raw, authoring=True))
         for nested, _ in _script_targets(raw, where):
             await visit(nested, where)
 
@@ -337,7 +340,7 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
     return list(dict.fromkeys(problems))
 
 
-async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list[str]:
+async def find_nested_scene_violations(hass: HomeAssistant, config: Any, *, authoring: bool = False) -> list[str]:
     """
     Why a script or automation may not be written: it activates a scene that sets a denied entity.
 
@@ -351,6 +354,14 @@ async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list
     Async because it reuses `scene_run_violations` unchanged — authoring and activation must never
     disagree about the same scene. Both callers are already coroutines and validate before taking
     the file lock, which is the order to keep.
+
+    **`authoring=True` adds one refusal activation does not make (#713):** a scene that sets an
+    `automation.*`, `script.*` or `scene.*`. Writing such a scene is refused outright
+    (`find_scene_write_violations`), but one the household wrote themselves still exists, and a model
+    that may not write `automation.turn_off` must not be able to write a link to a scene that does it.
+    Activating that scene is the owner's own configuration and stays allowed, which is why this is a
+    flag and not part of `scene_run_violations`: the labelled-script run check
+    (`script_run_violations`) calls this without it, so a household sequence keeps running.
     """
     problems: list[str] = []
     checked: set[str] = set()
@@ -375,7 +386,20 @@ async def find_nested_scene_violations(hass: HomeAssistant, config: Any) -> list
                 problems.append(f"scene.turn_on {eid}: only a named scene entity may be activated from a config")
                 continue
             problems += await scene_run_violations(hass, eid)
+            if authoring:
+                problems += await _scene_routine_violations(hass, eid)
     return list(dict.fromkeys(problems))
+
+
+async def _scene_routine_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
+    """The routines a scene sets, from both sources `find_scene_run_violations` reads (#713)."""
+    config = await _config_for_entity(hass, entity_id)
+    keys = list(config["entities"]) if isinstance(config, dict) and isinstance(config.get("entities"), dict) else []
+    return [
+        f"scene.turn_on {entity_id}: it sets {eid}, and an authored config may not switch an automation, script or scene through a scene"
+        for eid in dict.fromkeys(_members(hass, entity_id) + keys)
+        if _domain(eid) in ROUTINE_DOMAINS
+    ]
 
 
 async def scenes_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[str, Any]]:

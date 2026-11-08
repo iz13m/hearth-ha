@@ -767,3 +767,26 @@ def find_scene_policy_violations(config: Any) -> list[str]:
         # A group's `reproduce_state` sets every member, and a stored scene is reproduced the same way.
         f"entities.{eid}: a scene may not set a group; what its members are cannot be checked here" for eid in entities if _domain(eid) == _GROUP_DOMAIN
     ]
+
+
+def find_scene_write_violations(config: Any) -> list[str]:
+    """What a scene Hearth **writes** may not set, on top of `find_scene_policy_violations` (#713).
+
+    Mirror of `findSceneWriteViolations` in policy.ts. An `automation.*` key is reproduced as
+    `automation.turn_on` / `turn_off`, so a stored scene fired by an authored `scene.turn_on` would
+    switch a household rule, which AgDR-0042 keeps to `automations.set_enabled`. `script.*` and
+    `scene.*` go with it, as in `SCENE_UNSETTABLE_DOMAINS`.
+
+    Write only, and deliberately not part of `find_scene_policy_violations`: that one also runs every
+    time a scene is activated (`find_scene_run_violations`), and the owner's own scene that sets an
+    automation is theirs to run. The authoring-time *link* to such a scene is refused by
+    `find_nested_scene_violations(..., authoring=True)` instead.
+    """
+    entities = config.get("entities") if isinstance(config, dict) else None
+    if not isinstance(entities, dict):
+        return []
+    return [
+        f"entities.{eid}: a scene may not set an automation, script or scene; switching a routine is not something an authored config may do"
+        for eid in entities
+        if _domain(eid) in ROUTINE_DOMAINS
+    ]
