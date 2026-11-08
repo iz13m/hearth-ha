@@ -181,7 +181,7 @@ def _refuse_off_limits(entity_id: str) -> None:
     tile is one arrangement for the whole household. A lock inside a tile would launder that grant.
     """
     if _domain(entity_id) in OFF_LIMITS:
-        raise ProfileError(f"{entity_id} is a kind of thing Hearth never arranges")
+        raise ProfileError(f"{entity_id} is a kind of thing Azka never arranges")
 
 
 def _editable(value: Any) -> list[str]:
