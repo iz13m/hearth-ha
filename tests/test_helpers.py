@@ -88,6 +88,12 @@ async def test_a_new_helper_says_whether_hearth_can_read_it(core: HomeAssistant)
     async_expose_entity(core, "conversation", made["entities"][0], True)
     assert next(r for r in await d.dispatch("helpers.list", {}) if r["id"] == made["id"])["shared"] is True
 
+    # Hidden in the registry, it is exposed but `states.get` refuses it, so it is not shared (#644).
+    from homeassistant.helpers import entity_registry as er
+
+    er.async_get(core).async_update_entity(made["entities"][0], hidden_by=er.RegistryEntryHider.USER)
+    assert next(r for r in await d.dispatch("helpers.list", {}) if r["id"] == made["id"])["shared"] is False
+
 
 async def test_a_helper_with_nothing_readable_is_not_called_shared(core: HomeAssistant) -> None:
     from homeassistant.helpers import entity_registry as er

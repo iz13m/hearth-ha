@@ -210,3 +210,61 @@ async def test_states_get_refuses_an_off_limits_domain_in_its_own_words(core: Ho
         ALARM: "entity not available",
         UNEXPOSED: f"unknown entity {UNEXPOSED}",
     }
+
+
+async def test_running_a_routine_and_its_can_run_ask_visible(core: HomeAssistant, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`scenes.activate`, `scripts.run` and both lists' `can_run` follow `visible()` (#644).
+
+    The same swap as above, over an exposed, un-hidden scene and script. Before the swap both are
+    runnable and run (the control); after it, a site that still decides for itself keeps answering
+    for them.
+    """
+    d = build_dispatcher(core)
+    scene = (await d.dispatch("scenes.create", {"config": {"name": "Evening", "entities": {"input_boolean.test": "on"}}}))["entity_id"]
+    script = (
+        await d.dispatch(
+            "scripts.create",
+            {"config": {"alias": "Nudge", "sequence": [{"action": "input_boolean.turn_on", "target": {"entity_id": "input_boolean.test"}}]}},
+        )
+    )["entity_id"]
+    await core.async_block_till_done()
+    for entity_id in (scene, script):
+        async_expose_entity(core, "conversation", entity_id, True)
+
+    async def answers() -> dict[str, bool]:
+        def can_run(rows: list[dict], entity_id: str) -> bool:
+            return next(r for r in rows if r["entity_id"] == entity_id)["can_run"]
+
+        async def runs(method: str, entity_id: str) -> bool:
+            try:
+                await d.dispatch(method, {"entity_id": entity_id})
+            except RpcError as e:
+                assert (e.code, e.message) == ("not_found", f"unknown entity {entity_id}")
+                return False
+            return True
+
+        return {
+            "scenes.list": can_run(await d.dispatch("scenes.list", {}), scene),
+            "scripts.list": can_run(await d.dispatch("scripts.list", {}), script),
+            "scenes.activate": await runs("scenes.activate", scene),
+            "scripts.run": await runs("scripts.run", script),
+        }
+
+    sites = ("scenes.list", "scripts.list", "scenes.activate", "scripts.run")
+    assert await answers() == dict.fromkeys(sites, True)
+
+    real = registry.visible
+
+    def stricter(hass: HomeAssistant, entity_id: str, ent: Any, gates: Any = None) -> bool:
+        return entity_id not in (scene, script) and real(hass, entity_id, ent, gates)
+
+    holders = [
+        m
+        for name, m in list(sys.modules.items())
+        if name.startswith("custom_components.hearth_ai") and getattr(m, "visible", None) is real
+    ]
+    assert {m.__name__.rsplit(".", 1)[-1] for m in holders} >= {"control", "scenes", "scripts"}
+    for m in holders:
+        monkeypatch.setattr(m, "visible", stricter)
+
+    assert await answers() == dict.fromkeys(sites, False)

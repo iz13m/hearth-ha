@@ -19,7 +19,7 @@ from ..policy import _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
-from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, _off_limits_id, expand_members
+from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, visible
 from .resolve import resolve_registry_ids
 
 
@@ -484,11 +484,14 @@ async def scenes_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
     by_id = {str(i.get(CONF_ID)): plain(i) for i in data if isinstance(i, dict) and i.get(CONF_ID)}
     out = []
     gates = _gates(hass)
+    ent_reg = er.async_get(hass)
     for state in sorted(hass.states.async_all(SCENE_DOMAIN), key=lambda s: s.entity_id):
         scene_id = state.attributes.get("id")
         # Listed but not runnable, rather than hidden: the catalog is also how a scene is found in
         # order to *edit* it, and editing a scene the owner never exposed to Assist is fine.
-        can_run = _exposed(hass, state.entity_id) and not find_scene_run_violations(
+        # `visible()`, as `scenes.activate` asks it (#644): a scene hidden in the registry is listed
+        # and editable, but not runnable, even when exposed.
+        can_run = visible(hass, state.entity_id, ent_reg.async_get(state.entity_id), gates) and not find_scene_run_violations(
             hass, state.entity_id, by_id.get(str(scene_id)) if scene_id else None, gates
         )
         out.append(

@@ -497,7 +497,8 @@ def visible(hass: HomeAssistant, entity_id: str, ent: Any, gates: GateMap | None
 
     Not every list of the home's entities applies it. `scripts.list` and `scenes.list` list their own
     domain whether or not the owner exposed an entry, so that it can be found and edited, and say so
-    with `can_run`.
+    with `can_run`, which is this rule (#644), as is the check `scenes.activate` and `scripts.run`
+    make before running one: a scene or script the registry hid is not run, exposed or not.
 
     Three clauses: the domain is not in `OFF_LIMITS`, the registry has not hidden or disabled it,
     and the owner exposed it to Assist. The domain is the effective one, so a switch a `switch_as_x`

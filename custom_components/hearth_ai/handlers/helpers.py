@@ -32,7 +32,7 @@ from homeassistant.loader import async_get_config_flows, async_get_integrations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .flows import DENIED_DOMAINS, check_flow_input, check_secrets, check_switch_as_x_source, forget_fields, serialize_field_map, shape
-from .registry import _exposed, _gates, entry_carries_gate, gated_entry, off_limits
+from .registry import _gates, entry_carries_gate, gated_entry, off_limits, visible
 
 FLOW_TIMEOUT_S = 30
 
@@ -155,15 +155,15 @@ def _entry_dto(hass: HomeAssistant, entry: Any) -> dict[str, Any]:
     # naming one is the disclosure OFF_LIMITS exists to prevent. On the effective domain, so a
     # `switch_as_x` cover beside a lock wrapper is withheld like the lock (#643).
     gates = _gates(hass)
-    visible = [i for i in ids if not off_limits(hass, i, gates)]
+    listed = [i for i in ids if not off_limits(hass, i, gates)]
     return {
         "id": entry.entry_id,
         "domain": entry.domain,
         "kind": "flow",
         "name": entry.title,
-        "entities": visible,
-        "restricted": len(visible) != len(ids),
-        "shared": _shared(hass, visible),
+        "entities": listed,
+        "restricted": len(listed) != len(ids),
+        "shared": _shared(hass, listed),
     }
 
 
@@ -179,8 +179,12 @@ def _shared(hass: HomeAssistant, entity_ids: list[str]) -> bool:
     setting, and a model that could widen it could widen its own reach mid-turn (AgDR-0024). Saying
     so is the honest answer, and it is what this flag is for. An automation may reference the entity
     either way; exposure filters what Hearth *lists*, not what Home Assistant can trigger on.
+
+    "Can read" is `visible()`, the rule `states.get` applies, so an entity the registry hid or
+    disabled is not called shared even when exposed (#644): `states.get` would refuse it.
     """
-    return bool(entity_ids) and all(_exposed(hass, entity_id) for entity_id in entity_ids)
+    ent_reg = er.async_get(hass)
+    return bool(entity_ids) and all(visible(hass, entity_id, ent_reg.async_get(entity_id)) for entity_id in entity_ids)
 
 
 def _item_dto(hass: HomeAssistant, domain: str, item: dict[str, Any]) -> dict[str, Any]:

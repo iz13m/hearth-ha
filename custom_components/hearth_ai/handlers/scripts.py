@@ -33,7 +33,7 @@ from ..policy import (
 )
 from ..rpc import Dispatcher, RpcError
 from .common import check_hearth_scene_kept, lock_for, plain, read_yaml, require_config, require_str, write_yaml
-from .registry import GateMap, _exposed, _gates
+from .registry import GateMap, _gates, visible
 from .resolve import resolve_registry_ids
 from .gated import find_gate_violations
 from .scenes import (
@@ -101,6 +101,8 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
         data = await read_yaml(hass, path, {})
     file_keys = {str(k) for k in data} if isinstance(data, dict) else set()
     out = []
+    ent_reg = er.async_get(hass)
+    gates = _gates(hass)
     for state in sorted(hass.states.async_all(SCRIPT_DOMAIN), key=lambda s: s.entity_id):
         key = state.entity_id.split(".", 1)[1]
         out.append(
@@ -110,8 +112,9 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
                 "alias": state.name,
                 "description": None,
                 "editable": key in file_keys,
-                # Listed either way: an un-exposed script can still be read and edited, just not run.
-                "can_run": _exposed(hass, state.entity_id),
+                # Listed either way: an un-exposed or hidden script can still be read and edited, just
+                # not run. `visible()`, as `scripts.run` asks it (#644).
+                "can_run": visible(hass, state.entity_id, ent_reg.async_get(state.entity_id), gates),
                 # `Hearth: scene` — this script is a scene with steps or a schedule (AgDR-0044).
                 "hearth_scene": is_hearth_scene(hass, state.entity_id),
             }

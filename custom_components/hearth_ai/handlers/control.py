@@ -175,9 +175,9 @@ async def member_violations(
       only `devices.control`, and running a routine is the other switch's to grant; AgDR-0005's
       licence for a script to do whatever its owner wrote is a licence for `scripts.run`, which
       `routines.run` gates. `capabilities` is None only where everything is enabled (tests, legacy).
-    - **A scene** must be shared with Assist and pass its own run check (`scene_run_violations`,
+    - **A scene** must be shared with Assist, not hidden or disabled in the registry (#644), and pass its own run check (`scene_run_violations`,
       AgDR-0012), exactly as `scenes.activate` asks.
-    - **A script** must be shared with Assist, and one Hearth presents as a scene must pass its run
+    - **A script** must be shared with Assist and not hidden or disabled (#644), and one Hearth presents as a scene must pass its run
       check, exactly as `scripts.run` asks (AgDR-0005, AgDR-0044).
     - **An automation** is refused: switching one on or off is `automations.set_enabled`'s alone, an
       app-only path, and `automation.turn_on`/`turn_off`/`toggle` are refused by name (AgDR-0042).
@@ -214,6 +214,10 @@ async def member_violations(
         elif literal in ("scene", "script") and hass.states.get(member) is not None:
             if not _exposed(hass, member):
                 problems.append(f"{entity_id}: this group holds {member}, which is not shared with Assist, and a call on the group would run it")
+            elif not visible(hass, member, er.async_get(hass).async_get(member), gates):
+                # Exposed, but hidden or disabled in the registry: `scenes.activate` and `scripts.run`
+                # refuse it (#644), so a group holding it must not run it either.
+                problems.append(f"{entity_id}: this group holds {member}, which Hearth cannot see, and a call on the group would run it")
             elif literal == "scene" and (found := await scene_run_violations(hass, member)):
                 problems += [f"{entity_id}: this group holds {member}, which may not be activated: {v}" for v in found]
             elif literal == "script" and is_hearth_scene(hass, member) and (found := await script_run_violations(hass, member)):
@@ -221,17 +225,29 @@ async def member_violations(
     return list(dict.fromkeys(problems))
 
 
-async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_domain: str) -> dict[str, Any]:
+def _require_runnable(hass: HomeAssistant, params: dict[str, Any], expected_domain: str) -> str:
+    """The routine's id, if the model may run it; otherwise the refusal an unknown id gets.
+
+    Asked before anything reads what the routine contains, so a hidden or unshared scene whose
+    contents break the policy answers like an unknown id, not with reasons that say it exists (#644).
+    """
     entity_id = require_str(params, "entity_id")
     if not entity_id.startswith(f"{expected_domain}."):
         raise RpcError("invalid_params", f"entity_id must be a {expected_domain} entity")
     if hass.states.get(entity_id) is None:
         raise RpcError("not_found", f"unknown entity {entity_id}")
-    # Exposure is the owner's consent, and it gates running a routine exactly as it gates a direct
-    # service call. `devices_call` has always checked this; running a scene or script did not, which
-    # made activation the one way to reach an entity the owner kept out of Assist.
-    if not _exposed(hass, entity_id):
+    # The read rule, as `devices_call` asks it (#642, #644): exposure is the owner's consent, and a
+    # scene or script the registry hid or disabled is kept from the model even when exposed, so
+    # running one is not the way round "hidden wins". Refused in the words an unknown id gets (#648).
+    # `scenes.list` and `scripts.list` ask the same rule for `can_run`, so the app never offers a Run
+    # button this refuses.
+    if not visible(hass, entity_id, er.async_get(hass).async_get(entity_id)):
         raise RpcError("not_found", f"unknown entity {entity_id}")
+    return entity_id
+
+
+async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_domain: str) -> dict[str, Any]:
+    entity_id = _require_runnable(hass, params, expected_domain)
     try:
         async with asyncio.timeout(CALL_TIMEOUT_S):
             await hass.services.async_call(expected_domain, "turn_on", {"entity_id": entity_id}, blocking=True)
@@ -246,10 +262,9 @@ async def scenes_activate(hass: HomeAssistant, params: dict[str, Any]) -> dict[s
     when Hearth writes one. Otherwise a scene the owner wrote by hand could set a lock, and
     activating it would apply that, around the promise that locks are refused everywhere.
     """
-    entity_id = require_str(params, "entity_id")
-    if entity_id.startswith("scene.") and hass.states.get(entity_id) is not None:
-        if violations := await scene_run_violations(hass, entity_id):
-            raise RpcError("method_not_allowed", "; ".join(violations))
+    entity_id = _require_runnable(hass, params, "scene")
+    if violations := await scene_run_violations(hass, entity_id):
+        raise RpcError("method_not_allowed", "; ".join(violations))
     return await _run_entity(hass, params, "scene")
 
 
@@ -265,7 +280,7 @@ async def scripts_run(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, 
     a script, not one the app offers in the Scenes tab. The label is the owner's own, so putting it
     on a script *narrows* what that script may do, which is the safe direction for a label to work in.
     """
-    entity_id = require_str(params, "entity_id")
+    entity_id = _require_runnable(hass, params, "script")
     # Short-circuited on the label, so an ordinary script pays neither the file read nor the walk.
     if is_hearth_scene(hass, entity_id) and (violations := await script_run_violations(hass, entity_id)):
         raise RpcError("method_not_allowed", "; ".join(violations))
