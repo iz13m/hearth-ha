@@ -358,7 +358,7 @@ async def test_a_registry_id_in_a_list_or_a_section_of_a_form_is_resolved(core: 
 async def test_a_32_hex_api_key_is_refused_as_a_credential_before_it_is_read_as_an_id(core: HomeAssistant) -> None:
     """OpenWeatherMap's form takes a 32-hex `api_key` (`openweathermap/config_flow.py:48`).
 
-    `integrations_flow_step` runs `check_secrets` before `check_flow_input`, and `SECRET_NAME` matches
+    `integrations_flow_step` runs `check_secrets` before `check_flow_input`, and `is_secret_name` matches
     `api_key`, so the step is refused as a credential and the resolver never sees it.
     """
     d = build_dispatcher(core, frozenset({"integrations.manage"}))
@@ -369,20 +369,32 @@ async def test_a_32_hex_api_key_is_refused_as_a_credential_before_it_is_read_as_
     assert "credentials" in ei.value.message and "cannot resolve" not in ei.value.message
 
 
-async def test_a_32_hex_key_under_a_name_the_secret_check_misses_is_refused_as_unresolvable(core: HomeAssistant) -> None:
-    """The named cost. `xiaomi_ble` and `bthome` take a 32-hex `bindkey`, `yalexs_ble` a 32-hex `key`,
-    `switchbot` a 32-hex `encryption_key`, and `SECRET_NAME` matches none of those names. A lower-case
-    one names neither an entity nor a device, and is refused, with a message about registry ids.
-
-    That these keys reach `check_flow_input` at all is a gap in `check_secrets`, not this rule. It is
-    reported separately, so this row pins only the refusal and says nothing about other spellings.
+async def test_a_32_hex_ble_key_is_refused_as_a_credential(core: HomeAssistant) -> None:
+    """`xiaomi_ble` and `bthome` take a 32-hex `bindkey`, `yalexs_ble` a 32-hex `key`, `switchbot` a
+    32-hex `encryption_key`. Until #668 the credential check matched none of those names, so a
+    lower-case one reached the resolver and was refused for the wrong reason, as an unresolvable
+    registry id. Now `check_secrets` refuses each as the credential it is, before the resolver.
     """
     d = build_dispatcher(core, frozenset({"integrations.manage"}))
-    flow_id = await _start_flow(core, d, "demo_bindkey", vol.Schema({vol.Required("bindkey"): str}))
+    for name in ("bindkey", "key", "encryption_key"):
+        flow_id = await _start_flow(core, d, f"demo_{name}", vol.Schema({vol.Required(name): str}))
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch("integrations.flow_step", {"flow_id": flow_id, "input": {name: NEVER_EXISTED}})
+        assert ei.value.code == "method_not_allowed" and "credentials" in ei.value.message, name
+        assert "cannot resolve" not in ei.value.message
+        # The message reaches the hub and `audit_log.error`, so the key itself must not be in it.
+        assert NEVER_EXISTED not in ei.value.message
+
+
+async def test_a_32_hex_value_under_an_ordinary_name_is_refused_as_unresolvable(core: HomeAssistant) -> None:
+    """What the resolver still does for a field no secret check sees: a lower-case 32-hex value names
+    neither an entity nor a device, and is refused, with a message about registry ids and not the value.
+    """
+    d = build_dispatcher(core, frozenset({"integrations.manage"}))
+    flow_id = await _start_flow(core, d, "demo_serial", vol.Schema({vol.Required("serial"): str}))
     with pytest.raises(RpcError) as ei:
-        await d.dispatch("integrations.flow_step", {"flow_id": flow_id, "input": {"bindkey": NEVER_EXISTED}})
+        await d.dispatch("integrations.flow_step", {"flow_id": flow_id, "input": {"serial": NEVER_EXISTED}})
     assert ei.value.code == "validation_failed" and "cannot resolve" in ei.value.message
-    # The message reaches the hub and `audit_log.error`, so the key itself must not be in it.
     assert NEVER_EXISTED not in ei.value.message
 
 

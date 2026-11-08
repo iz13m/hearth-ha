@@ -31,7 +31,7 @@ from homeassistant.loader import async_get_config_flows, async_get_integrations
 
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .flows import DENIED_DOMAINS, check_flow_input, check_switch_as_x_source, forget_fields, serialize_field_map, shape
+from .flows import DENIED_DOMAINS, check_flow_input, check_secrets, check_switch_as_x_source, forget_fields, serialize_field_map, shape
 from .registry import _exposed, _gates, entry_carries_gate, gated_entry, off_limits
 
 FLOW_TIMEOUT_S = 30
@@ -323,6 +323,8 @@ async def helpers_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     config = params.get("config")
     if not isinstance(config, dict):
         raise RpcError("invalid_params", "config must be an object")
+    # A credential is never relayed, into a helper's form as into an integration's (#668).
+    check_secrets(hass, None, config, waiting=False)
     # The wrapper's source first: it answers a source the model cannot see in a ghost's words (ruling
     # 4), and the form check below would otherwise answer a lock's relay in words of its own (#643).
     check_switch_as_x_source(hass, domain, config)
@@ -361,6 +363,8 @@ async def helpers_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
             names = {f["name"] for f in shaped.get("fields") or []}
             step_input = {k: remaining.pop(k) for k in list(remaining) if k in names}
             step_id = result.get("step_id")
+            # The form `shape` just remembered says which of its fields are password-typed (#668).
+            check_secrets(hass, flow_id, step_input, waiting=False)
             result = await _step(hass, flow_id, step_input)
             if result["type"] is FlowResultType.CREATE_ENTRY:
                 return _entry_dto(hass, result.get("result"))
@@ -394,6 +398,7 @@ async def helpers_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     config = params.get("config")
     if not isinstance(config, dict):
         raise RpcError("invalid_params", "config must be an object")
+    check_secrets(hass, None, config, waiting=False)
     await check_flow_input(hass, config)
 
     split = _split_input_id(helper_id)

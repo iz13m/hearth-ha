@@ -124,9 +124,138 @@ DENIED_DOMAINS: frozenset[str] = frozenset(
     }
 )
 
-# Field names that hold credentials even when the schema does not say so (older flows use a
-# bare string for passwords). Matched case-insensitively against the field name.
-SECRET_NAME = re.compile(r"password|passwd|token|api_key|apikey|secret|credential|client_secret|pin|passcode|access_key", re.I)
+# Field names that hold credentials even when the schema does not say so: older flows use a bare
+# string for passwords, and newer ones for BLE keys, alarm codes and PSKs (#668). Pinned equal to
+# `packages/shared/src/secrets.ts` by `test_allowlist.py`, with the hub's verdict for every shared
+# case, because the hub refuses the same input and its audit redactor masks the same keys. The first
+# eleven substrings are the matcher this replaced, so nothing it refused is allowed now; the token
+# rules are anchored to whole tokens, because a bare `key` or `code` substring refuses `key_id` and
+# `country_code`, and `NOT_SECRET_NAMES` (each read in HA 2026.9.3) is exempt from those rules only.
+SECRET_NAME_SUBSTRINGS: tuple[str, ...] = (
+    "password",
+    "passwd",
+    "token",
+    "api_key",
+    "apikey",
+    "secret",
+    "credential",
+    "client_secret",
+    "pin",
+    "passcode",
+    "access_key",
+    "passphrase",
+    "passkey",
+    "bindkey",
+)
+SECRET_NAME_TOKENS: frozenset[str] = frozenset(
+    {"key", "keys", "psk", "otp", "totp", "hotp", "cookie", "cookies", "adbkey", "privkey", "pincode", "usercode", "usercodes", "pwd", "pswd"}
+)
+SECRET_NAME_FINAL_TOKENS: frozenset[str] = frozenset({"code"})
+SECRET_NAMES: frozenset[str] = frozenset({"device_authentication"})
+NOT_SECRET_NAMES: frozenset[str] = frozenset(
+    {
+        "key_id",
+        "country_code",
+        "zip_code",
+        "post_code",
+        "postal_code",
+        "place_code",
+        "station_code",
+        "language_code",
+        "qr_code",
+        "event_code",
+        "mac_code",
+        "request_new_code",
+        "use_psk",
+        "code_format",
+    }
+)
+# A form is a few levels deep at most: a section, or an action's `data`.
+SECRET_WALK_MAX_DEPTH = 32
+
+_CAMEL = re.compile(r"([a-z0-9])([A-Z])")
+_NOT_TOKEN = re.compile(r"[^a-z0-9]+")
+
+
+def _folded(name: str) -> str:
+    # `str.lower` leaves the long s alone; JavaScript's `toLowerCase` does too, and the old
+    # `re.IGNORECASE` matcher folded it, so both sides fold it by hand.
+    return name.lower().replace("ſ", "s")
+
+
+def secret_name_tokens(name: str) -> list[str]:
+    """The name's tokens: split at a lower-to-upper change, then on anything not a letter or digit."""
+    return [t for t in _NOT_TOKEN.split(_folded(_CAMEL.sub(r"\1_\2", name))) if t]
+
+
+def is_secret_name(name: str) -> bool:
+    """True when a field of this name holds a credential Hearth must not send (`isSecretFieldName`)."""
+    lower = _folded(name)
+    if any(s in lower for s in SECRET_NAME_SUBSTRINGS):
+        return True
+    tokens = secret_name_tokens(name)
+    joined = "_".join(tokens)
+    if joined in NOT_SECRET_NAMES:
+        return False
+    if joined in SECRET_NAMES:
+        return True
+    if any(t in SECRET_NAME_TOKENS for t in tokens):
+        return True
+    return bool(tokens) and tokens[-1] in SECRET_NAME_FINAL_TOKENS
+
+
+def find_secret_paths(value: Any) -> list[str]:
+    """Every path in a form's values whose key names a credential, sorted (`findSecretFieldPaths`).
+
+    A section arrives as a nested dict (`{"auth": {"password": ...}}`), which a top-level read missed
+    (#668). A path names keys and list indices, never a value. A value nested deeper than
+    `SECRET_WALK_MAX_DEPTH` is refused at the path where the walk stopped: no form is that deep, and
+    what the walk cannot see it cannot call safe.
+    """
+    out: list[str] = []
+
+    def walk(v: Any, path: list[str], depth: int) -> None:
+        if depth > SECRET_WALK_MAX_DEPTH:
+            out.append(".".join(path))
+            return
+        if isinstance(v, list):
+            for i, x in enumerate(v):
+                walk(x, [*path, str(i)], depth + 1)
+        elif isinstance(v, dict):
+            for k, x in v.items():
+                if is_secret_name(str(k)):
+                    out.append(".".join([*path, str(k)]))
+                else:
+                    walk(x, [*path, str(k)], depth + 1)
+
+    walk(value, [], 0)
+    return sorted(out)
+
+
+def _dict_paths(value: Any, prefix: str = "") -> set[str]:
+    """Every key path through nested dicts: where a section's fields land in a submission."""
+    out: set[str] = set()
+    if isinstance(value, dict):
+        for k, v in value.items():
+            path = f"{prefix}{k}"
+            out.add(path)
+            out |= _dict_paths(v, f"{path}.")
+    return out
+
+
+def secret_paths(fields: list[dict[str, Any]], prefix: str = "") -> list[str]:
+    """The secret fields of a serialised form, a section's own as `section.field`."""
+    out: list[str] = []
+    for f in fields:
+        path = f"{prefix}{f.get('name', '')}"
+        inner = f.get("fields")
+        if is_secret_name(str(f.get("name", ""))):
+            out.append(path)
+        elif isinstance(inner, list) and inner:
+            out += secret_paths(inner, f"{path}.")
+        elif f.get("secret"):
+            out.append(path)
+    return out
 
 # What we showed the model for each open flow: {flow_id: [field, ...]}. Bounded, because a flow the
 # model abandons without telling us would otherwise leak an entry apiece.
@@ -141,33 +270,49 @@ except ImportError:  # pragma: no cover
     from voluptuous_serialize import convert as serialize_schema
 
 
+def _section_fields(field: dict[str, Any]) -> list[dict[str, Any]]:
+    """A `section`'s own fields: the serialiser shows one as a single `expandable` field (#668)."""
+    inner = field.get("schema")
+    return [f for f in inner if isinstance(f, dict)] if isinstance(inner, list) else []
+
+
 def is_secret(field: dict[str, Any]) -> bool:
+    """A credential by its name, by a password-typed selector, or a section holding either."""
     name = str(field.get("name", ""))
-    if SECRET_NAME.search(name):
+    if is_secret_name(name):
         return True
     selector = field.get("selector")
     if isinstance(selector, dict):
         text = selector.get("text")
         if isinstance(text, dict) and text.get("type") == "password":
             return True
-    return False
+    return any(is_secret(f) for f in _section_fields(field))
 
 
 def flatten(field: dict[str, Any]) -> dict[str, Any]:
-    """Home Assistant's serialisation -> the compact shape the hub's schema expects."""
+    """Home Assistant's serialisation -> the compact shape the hub's schema expects.
+
+    A secret field goes out without its `default` or `description` (#668). A reauth form is shown
+    with `default=entry.data[CONF_PASSWORD]`, and `description` carries `suggested_value`, so the
+    stored password came back to Hearth beside `secret: true` without anyone typing it. A section's
+    fields are kept under `fields`, so `check_secrets` knows which of them were secret.
+    """
     selector = field.get("selector") if isinstance(field.get("selector"), dict) else None
     kind = field.get("type")
     if not kind and selector:
         kind = next(iter(selector), "string")
+    secret = is_secret(field)
     out: dict[str, Any] = {
         "name": str(field.get("name", "")),
         "type": str(kind or "string"),
         "required": bool(field.get("required", False)),
-        "secret": is_secret(field),
+        "secret": secret,
     }
-    if (default := field.get("default")) is not None:
+    if inner := _section_fields(field):
+        out["fields"] = [flatten(f) for f in inner]
+    if not secret and (default := field.get("default")) is not None:
         out["default"] = default
-    if (desc := field.get("description")) is not None:
+    if not secret and (desc := field.get("description")) is not None:
         out["description"] = str(desc)
     options = field.get("options")
     if options is None and selector:
@@ -212,7 +357,7 @@ def serialize_field_map(fields: Any, what: str) -> list[dict[str, Any]]:
                     "name": str(name),
                     "type": "string",
                     "required": type(marker).__name__ == "Required",
-                    "secret": SECRET_NAME.search(str(name)) is not None,
+                    "secret": is_secret_name(str(name)),
                 }
             )
     return out
@@ -221,10 +366,12 @@ def serialize_field_map(fields: Any, what: str) -> list[dict[str, Any]]:
 def remember_fields(hass: HomeAssistant, flow_id: str, fields: list[dict[str, Any]]) -> None:
     """Keep the serialisation we handed out, so `flow_step` can tell which fields were secret."""
     store: dict[str, list[dict[str, Any]]] = hass.data.setdefault(DATA_FLOW_FIELDS, {})
-    if len(store) >= MAX_TRACKED_FLOWS and flow_id not in store:
-        # Bounded rather than clever: forgetting a form costs only the selector-based half of the
-        # credential check, and the name-based half still holds for every field.
-        store.clear()
+    store.pop(flow_id, None)
+    while len(store) >= MAX_TRACKED_FLOWS:
+        # Bounded, oldest first. It used to clear the whole store, so opening 32 flows was a way to
+        # make Hearth forget which fields of a live form were password-typed (#668). A forgotten form
+        # is read again from the flow manager by `check_secrets`, and refused if it cannot be.
+        store.pop(next(iter(store)))
     store[flow_id] = fields
 
 
@@ -244,10 +391,13 @@ def shape(hass: HomeAssistant, domain: str, result: dict[str, Any]) -> dict[str,
     if rtype is FlowResultType.FORM:
         out["step_id"] = result.get("step_id")
         out["errors"] = {k: str(v) for k, v in (result.get("errors") or {}).items()}
-        out["description_placeholders"] = {k: str(v) for k, v in (result.get("description_placeholders") or {}).items()} or None
+        # A placeholder named like a credential is left out: `otp`'s confirm step puts the new TOTP
+        # seed in one called `code` (#668).
+        placeholders = result.get("description_placeholders") or {}
+        out["description_placeholders"] = {k: str(v) for k, v in placeholders.items() if not is_secret_name(str(k))} or None
         fields = serialize_fields(result.get("data_schema"), f"{domain} step {result.get('step_id')}")
         out["fields"] = fields
-        out["secret_fields"] = [f["name"] for f in fields if f["secret"]]
+        out["secret_fields"] = secret_paths(fields)
         remember_fields(hass, out["flow_id"], fields)
     elif rtype is FlowResultType.CREATE_ENTRY:
         out["title"] = result.get("title")
@@ -272,23 +422,73 @@ def check_domain(domain: str) -> str:
     return domain
 
 
-def check_secrets(hass: HomeAssistant, flow_id: str, user_input: dict[str, Any]) -> None:
+def check_secrets(hass: HomeAssistant, flow_id: str | None, user_input: dict[str, Any], *, waiting: bool = True) -> None:
     """Refuse to relay credentials; the person finishes those steps in Home Assistant itself.
 
-    Two halves. The name test catches a bare string field in an older flow. The remembered
-    serialisation catches a password-*typed* field with an innocent name — which is what the
-    `flow.get("data_schema")` arm was meant to do and never could, because that key is not in an
-    `async_progress()` dict at all.
+    Two halves. The name test catches a bare string field in an older flow, at any depth, because a
+    section's fields arrive nested (#668). The remembered serialisation catches a password-*typed*
+    field with an innocent name, in a section too — which is what the `flow.get("data_schema")` arm
+    was meant to do and never could, because that key is not in an `async_progress()` dict at all.
+    `flow_id` is None where there is no form yet (a helper's `config`), and only names are checked.
+
+    The form is read from the flow manager first (`_live_form`), because Hearth did not start every
+    flow it may be asked to step: a discovered or reauth flow comes from `integrations.discovered`,
+    and a person may have moved a flow on in Home Assistant since Hearth showed it. What Hearth showed
+    is the fallback. With neither, a non-empty step is refused (#668): an adax `wifi_pswd` is a
+    password-typed field that no name rule could have caught.
+
+    The refusal names the field, never the value: it reaches the hub and `audit_log.error`.
     """
-    refused = {k for k in user_input if SECRET_NAME.search(str(k))}
-    refused |= {str(f["name"]) for f in remembered_fields(hass, flow_id) if f.get("secret") and f.get("name") in user_input}
+    refused = set(find_secret_paths(user_input))
+    finish = (
+        ". The setup is waiting in Home Assistant under Settings > Devices & services; finish it there."
+        if waiting
+        else ". Make this helper in Home Assistant under Settings > Devices & services > Helpers instead."
+    )
+    if flow_id is not None:
+        fields = _live_form(hass, flow_id)
+        if fields is not None:
+            remember_fields(hass, flow_id, fields)
+        elif flow_id in (hass.data.get(DATA_FLOW_FIELDS) or {}):
+            fields = remembered_fields(hass, flow_id)
+        elif user_input and not refused:
+            raise RpcError("method_not_allowed", "Hearth cannot read the form this setup is showing, so it will not fill it in" + finish)
+        refused |= set(secret_paths(fields or [])) & _dict_paths(user_input)
     if refused:
         raise RpcError(
             "method_not_allowed",
             "Hearth will not send credentials on your behalf: "
             + ", ".join(sorted(refused))
-            + ". The setup is waiting in Home Assistant under Settings > Devices & services; finish it there.",
+            + finish,
         )
+
+
+def _live_form(hass: HomeAssistant, flow_id: str) -> list[dict[str, Any]] | None:
+    """The form a flow is showing now, serialised, or None when it cannot be read.
+
+    `FlowManager._progress` and `FlowHandler.cur_step` are private: `async_progress()` builds its
+    dicts without the schema. `async_configure` reads the same `cur_step` to validate a step
+    (`data_entry_flow.py`), so it is the form the input will meet. Anything unexpected is None, and
+    `check_secrets` then falls back to what Hearth showed, or refuses.
+    """
+    try:
+        flow = hass.config_entries.flow._progress.get(flow_id)  # noqa: SLF001 - see the docstring
+        step = getattr(flow, "cur_step", None) if flow is not None else None
+        if not isinstance(step, dict):
+            return None
+        if step.get("type") is FlowResultType.MENU:
+            return []
+        if step.get("type") is not FlowResultType.FORM:
+            return None
+        schema = step.get("data_schema")
+        if schema is None:
+            return []
+        # Not `serialize_fields`, which answers [] for a form it cannot read: here that would mean
+        # "nothing secret", and an unreadable form is the case this exists to refuse.
+        return [flatten(f) for f in serialize_schema(schema, custom_serializer=cv.custom_serializer)]
+    except Exception:  # noqa: BLE001 - a private API that moved is a form we cannot read
+        _LOGGER.debug("could not read the live form of flow %s", flow_id, exc_info=True)
+        return None
 
 
 async def check_flow_input(hass: HomeAssistant, config: Any) -> None:
