@@ -523,6 +523,41 @@ def visible(hass: HomeAssistant, entity_id: str, ent: Any, gates: GateMap | None
     return _exposed(hass, entity_id)
 
 
+RUN_REFUSALS = ("hidden", "not_shared", "contents")
+
+
+def run_fields(hass: HomeAssistant, entity_id: str, ent: Any, gates: GateMap, *, shown: bool, refused_contents: bool) -> dict[str, Any]:
+    """`can_run`, and `run_refusal` when it is false, for one row of `scenes.list` or `scripts.list` (#758).
+
+    `shown` is `visible()` for the routine and `refused_contents` whether its run-time scan found
+    anything; the caller asks the scan only of a shown routine, since a routine nobody can see answers
+    `not_found` before its contents are read. The reason is for the hub, which turns it into the app's
+    words: "hidden" is fixed by un-hiding it in Home Assistant, "not_shared" by sharing it with Assist,
+    and "contents" by changing what it sets. Sharing fixes only the second, which is why the app needs
+    to know which (#758).
+
+    It changes nothing a model is told. A run of a hidden or unshared routine still answers
+    `not_found` in the words an unknown id gets (#642), and the hub strips the field from every surface
+    but the app's, so a model, which sees both listed with `can_run: false` (#644), cannot tell a
+    hidden routine from an unshared one through it. A reason this
+    function does not recognise (an off-limits domain, which a scene or script cannot have) leaves the
+    field out, which the hub reads as unknown.
+    """
+    if shown and not refused_contents:
+        return {"can_run": True}
+    if shown:
+        reason: str | None = "contents"
+    elif ent is not None and (ent.hidden_by or ent.disabled_by):
+        reason = "hidden"
+    elif entity_id.split(".", 1)[0] in OFF_LIMITS or effective_domain(hass, entity_id, gates) in OFF_LIMITS:
+        reason = None
+    elif not _exposed(hass, entity_id):
+        reason = "not_shared"
+    else:
+        reason = None
+    return {"can_run": False, **({"run_refusal": reason} if reason else {})}
+
+
 async def areas_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[str, Any]]:
     """Areas, each with its floor's storey number and name when it is on one.
 

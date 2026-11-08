@@ -20,7 +20,7 @@ from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
 from .remotes import find_nested_remote_violations, find_remote_violations
-from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, visible
+from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, run_fields, visible
 from .resolve import resolve_registry_ids
 
 
@@ -499,16 +499,17 @@ async def scenes_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
         # order to *edit* it, and editing a scene the owner never exposed to Assist is fine.
         # `visible()`, as `scenes.activate` asks it (#644): a scene hidden in the registry is listed
         # and editable, but not runnable, even when exposed.
-        can_run = visible(hass, state.entity_id, ent_reg.async_get(state.entity_id), gates) and not find_scene_run_violations(
-            hass, state.entity_id, by_id.get(str(scene_id)) if scene_id else None, gates
-        )
+        ent = ent_reg.async_get(state.entity_id)
+        shown = visible(hass, state.entity_id, ent, gates)
+        refused = shown and bool(find_scene_run_violations(hass, state.entity_id, by_id.get(str(scene_id)) if scene_id else None, gates))
         out.append(
             {
                 "id": str(scene_id) if scene_id else state.entity_id,
                 "entity_id": state.entity_id,
                 "name": state.name,
                 "editable": bool(scene_id) and str(scene_id) in file_ids,
-                "can_run": can_run,
+                # `can_run`, and when it is false, why: hidden, not shared, or what it sets (#758).
+                **run_fields(hass, state.entity_id, ent, gates, shown=shown, refused_contents=refused),
             }
         )
     return out

@@ -33,7 +33,7 @@ from ..policy import (
 )
 from ..rpc import Dispatcher, RpcError
 from .common import check_hearth_scene_kept, lock_for, plain, read_yaml, require_config, require_str, write_yaml
-from .registry import GateMap, _gates, visible
+from .registry import GateMap, _gates, run_fields, visible
 from .resolve import resolve_registry_ids
 from .gated import find_gate_violations
 from .remotes import find_remote_violations
@@ -106,6 +106,15 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
     gates = _gates(hass)
     for state in sorted(hass.states.async_all(SCRIPT_DOMAIN), key=lambda s: s.entity_id):
         key = state.entity_id.split(".", 1)[1]
+        ent = ent_reg.async_get(state.entity_id)
+        # `Hearth: scene` — this script is a scene with steps or a schedule (AgDR-0044).
+        labelled = is_hearth_scene(hass, state.entity_id)
+        # Listed either way: an un-exposed or hidden script can still be read and edited, just not
+        # run. `visible()`, as `scripts.run` asks it (#644), and for a labelled script the run-time
+        # scan `scripts.run` makes too (#759), in the same order: a script nobody can see is not read.
+        shown = visible(hass, state.entity_id, ent, gates)
+        # The copy read above, as `scenes_list` passes `by_id`: one file read for the whole list.
+        refused = shown and labelled and bool(await script_run_violations(hass, state.entity_id, data))
         out.append(
             {
                 "id": key,
@@ -113,11 +122,8 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
                 "alias": state.name,
                 "description": None,
                 "editable": key in file_keys,
-                # Listed either way: an un-exposed or hidden script can still be read and edited, just
-                # not run. `visible()`, as `scripts.run` asks it (#644).
-                "can_run": visible(hass, state.entity_id, ent_reg.async_get(state.entity_id), gates),
-                # `Hearth: scene` — this script is a scene with steps or a schedule (AgDR-0044).
-                "hearth_scene": is_hearth_scene(hass, state.entity_id),
+                **run_fields(hass, state.entity_id, ent, gates, shown=shown, refused_contents=refused),
+                "hearth_scene": labelled,
             }
         )
     return out
@@ -223,7 +229,7 @@ def _script_key(hass: HomeAssistant, entity_id: str) -> str:
     return entity_id.split(".", 1)[1] if "." in entity_id else entity_id
 
 
-async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
+async def script_run_violations(hass: HomeAssistant, entity_id: str, data: Any = None) -> list[str]:
     """
     Why a script Hearth presents as a scene may not run. Empty means it may.
 
@@ -245,11 +251,16 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
 
     The residual case is a restore *during* the run: the owner restores the deleted entity while the
     labelled script is partway through, in a `delay` say, and HA resolves the later step to it.
+
+    `data` is `scripts.yaml` as the caller already parsed it, for `scripts.list`, which asks this of
+    every labelled script and would otherwise read the file once per script. A run passes nothing and
+    reads it fresh, so the check that refuses a run is never made against a stale copy.
     """
     key = _script_key(hass, entity_id)
-    path = _path(hass)
-    async with lock_for(path):
-        data = await read_yaml(hass, path, {})
+    if data is None:
+        path = _path(hass)
+        async with lock_for(path):
+            data = await read_yaml(hass, path, {})
     config = plain(data[key]) if isinstance(data, dict) and key in data else None
     if config is None:
         return []
