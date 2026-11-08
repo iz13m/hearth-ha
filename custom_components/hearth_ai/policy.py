@@ -35,6 +35,13 @@ DENIED_ACTION_DOMAINS: frozenset[str] = frozenset(
         # `alarm_control_panel`, ruled by the owner (#527). Some "sirens" are chimes; refusing them
         # too is the side to err on.
         "siren",
+        # Every service under `androidtv` is host-level in effect, the same class as
+        # `shell_command`: `adb_command` runs any `adb shell` line on the TV and writes its output
+        # into the player's `adb_response` attribute, `download` pulls a TV file into an allowed
+        # path such as `/config/www` (served unauthenticated at `/local/`), `upload` pushes one from
+        # `/config/www` or `/media`, and `learn_sendevent` reads raw input events. Those four are
+        # the whole domain on 2026.9.3; the TV is still driven through `media_player.*`.
+        "androidtv",
     }
 )
 DENIED_ACTIONS: frozenset[str] = frozenset(

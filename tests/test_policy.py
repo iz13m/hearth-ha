@@ -890,7 +890,7 @@ def test_every_path_writing_service_is_classified() -> None:
     # `device_tracker.see` callable: the very service this file classifies in bucket 4 for writing
     # `known_devices.yaml`. "Pinned somewhere" is not pinned; each list needs its own teeth.
     ALL_DENIED_ACTION_DOMAINS = (
-        "alarm_control_panel", "auth", "backup", "camera", "cloud", "device_tracker", "ffmpeg",
+        "alarm_control_panel", "androidtv", "auth", "backup", "camera", "cloud", "device_tracker", "ffmpeg",
         "hassio", "lock", "onboarding", "person", "python_script", "recorder", "shell_command",
         "siren", "stream", "update",
     )
