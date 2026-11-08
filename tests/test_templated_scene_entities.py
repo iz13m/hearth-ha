@@ -166,20 +166,21 @@ async def test_home_assistant_turns_an_automation_on_through_a_scene_key(core: H
         assert res["ok"] is False and res["status"] == "policy" and key in res["error"], key
 
 
-async def test_a_stored_scene_that_sets_a_group_is_refused_when_written_and_when_run(core: HomeAssistant) -> None:
-    """The AgDR-0012 contents check: from scenes.yaml, and from the membership attribute when there is none."""
-    from custom_components.hearth_ai.handlers.scenes import find_scene_run_violations
+async def test_a_stored_scene_that_sets_a_group_of_locks_is_refused_when_written_and_when_run(core: HomeAssistant) -> None:
+    """The AgDR-0012 contents check: from scenes.yaml, and from the membership attribute when there is
+    none. Writing a group key is refused outright; running one walks its members (#714)."""
+    from custom_components.hearth_ai.handlers.scenes import UNREACHABLE_SCENE, find_scene_run_violations
 
     d = build_dispatcher(core)
     with pytest.raises(RpcError) as ei:
         await d.dispatch("scenes.create", {"config": {"name": "Doors", "entities": {"group.doors": "unlocked"}}})
     assert ei.value.code == "validation_failed" and "group.doors" in ei.value.message
+    core.states.async_set(LOCK, "locked")
+    core.states.async_set("group.doors", "off", {"entity_id": [LOCK]})
     stored = {"id": "1", "name": "Doors", "entities": {"group.doors": "unlocked"}}
-    assert find_scene_run_violations(core, "scene.doors", stored) == ["entities.group.doors: a scene may not set a group; what its members are cannot be checked here"]
+    assert find_scene_run_violations(core, "scene.doors", stored) == [UNREACHABLE_SCENE]
     core.states.async_set("scene.doors", "unknown", {"friendly_name": "Doors", "entity_id": ["group.doors", "light.a"]})
-    assert find_scene_run_violations(core, "scene.doors", None) == [
-        "group.doors: a scene that sets a group cannot be activated; what its members are cannot be checked here"
-    ]
+    assert find_scene_run_violations(core, "scene.doors", None) == [UNREACHABLE_SCENE]
     nested = {"alias": "Doors", "sequence": [{"action": "scene.turn_on", "target": {"entity_id": "scene.doors"}}]}
     res = await d.dispatch("scripts.validate", {"config": nested})
     assert res["ok"] is False and res["status"] == "policy" and "group.doors" in res["error"]

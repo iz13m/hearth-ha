@@ -917,16 +917,17 @@ def find_scene_policy_violations(config: Any) -> list[str]:
     entities = config.get("entities") if isinstance(config, dict) else None
     if not isinstance(entities, dict):
         return []
+    # A `group.*` key is not refused here: this is also the run-time verdict, and the run walks the
+    # group's members instead (`find_scene_run_violations`, #714). Writing one is refused by
+    # `find_scene_write_violations`.
     return [f"entities.{eid}: denied domain {_domain(eid)}" for eid in entities if _domain(eid) in DENIED_ENTITY_DOMAINS] + [
         f"entities.{eid}: a scene may only close a valve" for eid, v in entities.items() if _domain(eid) == VALVE_DOMAIN and not _valve_state_closes(v)
-    ] + [
-        # A group's `reproduce_state` sets every member, and a stored scene is reproduced the same way.
-        f"entities.{eid}: a scene may not set a group; what its members are cannot be checked here" for eid in entities if _domain(eid) == _GROUP_DOMAIN
     ]
 
 
 def find_scene_write_violations(config: Any) -> list[str]:
-    """What a scene Hearth **writes** may not set, on top of `find_scene_policy_violations` (#713).
+    """What a scene Hearth **writes** may not set, on top of `find_scene_policy_violations` (#713): a
+    routine, and (since #714) a group.
 
     Mirror of `findSceneWriteViolations` in policy.ts. An `automation.*` key is reproduced as
     `automation.turn_on` / `turn_off`, so a stored scene fired by an authored `scene.turn_on` would
@@ -941,8 +942,12 @@ def find_scene_write_violations(config: Any) -> list[str]:
     entities = config.get("entities") if isinstance(config, dict) else None
     if not isinstance(entities, dict):
         return []
-    return [
-        f"entities.{eid}: a scene may not set an automation, script or scene; switching a routine is not something an authored config may do"
-        for eid in entities
-        if _domain(eid) in ROUTINE_DOMAINS
-    ]
+    problems: list[str] = []
+    for eid in entities:
+        if _domain(eid) in ROUTINE_DOMAINS:
+            problems.append(f"entities.{eid}: a scene may not set an automation, script or scene; switching a routine is not something an authored config may do")
+        # A group's `reproduce_state` sets every member, so `{"group.doors": "unlocked"}` unlocks each
+        # lock in it. Write only since #714: a household scene's groups are walked when it runs.
+        if _domain(eid) == _GROUP_DOMAIN:
+            problems.append(f"entities.{eid}: a scene may not set a group; what its members are cannot be checked here")
+    return problems

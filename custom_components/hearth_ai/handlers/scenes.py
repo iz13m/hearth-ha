@@ -15,11 +15,11 @@ from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from ..policy import ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_DOMAIN, _domain, _entity_ids, _fold, _service_name, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations, find_scene_write_violations
+from ..policy import _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_DOMAIN, _domain, _entity_ids, _fold, _service_name, _valve_state_closes, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations, find_scene_write_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
-from .registry import OFF_LIMITS, GateMap, _exposed, _gates
+from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, _off_limits_id, expand_members
 from .resolve import resolve_registry_ids
 
 
@@ -116,19 +116,19 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
     locks are refused everywhere. Both sources are checked because neither is complete: the config
     is authoritative but only exists for scenes in scenes.yaml, and the attribute covers the rest.
     """
+    gates = _gates(hass) if gates is None else gates
     members = _members(hass, entity_id)
+    entities = config.get("entities") if isinstance(config, dict) else None
+    # Lower-cased as Home Assistant lower-cases a scene key when it loads one (`cv.entity_id`).
+    stored: dict[str, Any] = {str(k).lower(): v for k, v in entities.items()} if isinstance(entities, dict) else {}
     # Unnamed, as `gated_refusals` words a relay under a lock (#722): for a scene with no scenes.yaml
     # entry this attribute is the only place the id appears, and every reader answers for it as for
     # an unknown id, so the refusal must not be the one place that says it exists.
     problems = [UNREACHABLE_SCENE for eid in members if eid.split(".", 1)[0] in DENIED_ENTITY_DOMAINS]
-    # A group's `reproduce_state` sets every member: `group.doors: unlocked` unlocks each lock in it.
-    # The attribute covers a scene with no scenes.yaml entry; the config's keys are checked below.
-    problems += [f"{eid}: a scene that sets a group cannot be activated; what its members are cannot be checked here" for eid in members if eid.split(".", 1)[0].lower() == "group"]
     # A switch a `switch_as_x` helper presents as a lock, siren or valve, any other wrapper on it, and
     # any group over one of those (#643): setting it moves what the gate stands for. The config's own
     # keys count too, in case the attribute is missing.
-    named = members + (list(config["entities"]) if isinstance(config, dict) and isinstance(config.get("entities"), dict) else [])
-    problems += gated_refusals(_gates(hass) if gates is None else gates, named)
+    problems += gated_refusals(gates, members + list(stored))
     # A scene may close a valve and never open one (#527). The membership attribute names the valve
     # but not the state it is set to, so without scenes.yaml there is no way to tell which way it
     # moves, and that is refused rather than assumed.
@@ -140,6 +140,56 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
         ]
     if config:
         problems += find_scene_policy_violations(config)
+    # A group's `reproduce_state` sets every member: `group.doors: unlocked` unlocks each lock in it.
+    # So each group is walked and every member judged as if the scene set it directly (#714), once
+    # however many of the two sources name it: the config and the attribute used to refuse one group
+    # in two wordings. The attribute counts even with a config, since it is what the live scene sets.
+    for group in dict.fromkeys(eid.lower() for eid in [*members, *stored] if eid.split(".", 1)[0].lower() == _GROUP_DOMAIN):
+        problems += group_refusals(hass, group, stored.get(group, _UNKNOWN_STATE), gates)
+    return list(dict.fromkeys(problems))
+
+
+# A group the membership attribute names but scenes.yaml does not: the state it is set to is unknown.
+_UNKNOWN_STATE = object()
+
+
+def group_refusals(hass: HomeAssistant, group: str, value: Any, gates: GateMap) -> list[str]:
+    """Why a scene that sets `group` to `value` may not run, member by member (#714).
+
+    Home Assistant's `group/reproduce_state.py` hands the group's stored state to every member, and a
+    member that is itself a group hands it on again, so each entity `expand_members` reaches is put
+    through the checks a scene key gets: the off-limits domains, on the effective domain a
+    `switch_as_x` gate gives it (#643); a gated relay; and a valve, which only `closed` may reach
+    (#527). A scene member is reported but not walked (`stop`): its attribute is what *it* sets, and
+    a group passing a state to a scene sets nothing (scene has no `reproduce_state`).
+
+    A group `expand_members` gives up on (two groups holding each other, or past its bounds) is
+    refused rather than run half-checked. Home Assistant's own expansion of such a cycle recurses
+    until Python's limit, so nothing the household relies on is lost.
+
+    A group that is itself off-limits (one a lock or siren gate rests on through its members, #643)
+    is hidden from every reader, so no refusal here names it (#722's rule): each says
+    `UNREACHABLE_SCENE` instead.
+    """
+    hidden = _off_limits_id(hass, group, gates)
+    try:
+        reached = expand_members(hass, group, stop=frozenset({SCENE_DOMAIN}))
+    except MembershipUnwalkable as err:
+        if hidden:
+            return [UNREACHABLE_SCENE]
+        if err.cycle:
+            return [f"{group}: this scene sets a group that reaches groups that hold each other, so it cannot be activated"]
+        return [f"{group}: this scene sets a group holding too many entities, or groups nested too deep, for Hearth to check, so it cannot be activated"]
+    # Unnamed for the reason the attribute check above gives (#722); `_off_limits_id` reads both the
+    # literal domain and the effective one.
+    problems = [UNREACHABLE_SCENE for eid in reached if _off_limits_id(hass, eid, gates)]
+    problems += gated_refusals(gates, reached)
+    closes = value is not _UNKNOWN_STATE and _valve_state_closes(value)
+    problems += [
+        UNREACHABLE_SCENE if hidden else f"{group}: this group holds {eid}, and a scene may only close a valve"
+        for eid in reached
+        if eid.split(".", 1)[0] == VALVE_DOMAIN and not closes
+    ]
     return list(dict.fromkeys(problems))
 
 
@@ -406,13 +456,23 @@ async def find_nested_scene_violations(hass: HomeAssistant, config: Any, *, auth
 
 
 async def _scene_routine_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
-    """The routines a scene sets, from both sources `find_scene_run_violations` reads (#713)."""
+    """The routines and groups a scene sets, from both sources `find_scene_run_violations` reads (#713, #714).
+
+    A group is here because its members are read when the scene runs, and a link written now runs
+    later, by Home Assistant, past any check of Hearth's: what the group holds then is not what was
+    checked now. The household's own activation of the scene walks the group each time instead.
+    """
     config = await _config_for_entity(hass, entity_id)
     keys = list(config["entities"]) if isinstance(config, dict) and isinstance(config.get("entities"), dict) else []
+    ids = list(dict.fromkeys(_members(hass, entity_id) + keys))
     return [
         f"scene.turn_on {entity_id}: it sets {eid}, and an authored config may not switch an automation, script or scene through a scene"
-        for eid in dict.fromkeys(_members(hass, entity_id) + keys)
+        for eid in ids
         if _domain(eid) in ROUTINE_DOMAINS
+    ] + [
+        f"scene.turn_on {entity_id}: it sets {eid}, a group whose members can change after this is written, so an authored config may not activate it"
+        for eid in ids
+        if _domain(eid) == _GROUP_DOMAIN
     ]
 
 
