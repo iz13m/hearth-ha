@@ -18,10 +18,11 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
 
 from custom_components.hearth_ai import labels as hl
 from custom_components.hearth_ai.handlers.gated import GATED_NAMED
+from custom_components.hearth_ai.handlers.scripts import script_run_violations
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 from .test_switch_as_x import _bare, _calls, _err, _group, _mock_switch, _source, _wrap, _wrapper
@@ -426,6 +427,140 @@ async def test_a_scene_script_that_starts_a_script_reaching_the_lock_relay_is_no
     assert await _err(d.dispatch("scripts.run", {"entity_id": "script.calm"})) is None
     await core.async_block_till_done()
     assert _calls(switched) == [("turn_on", [lamp])]
+
+
+async def test_a_scene_script_whose_started_script_activates_a_scene_setting_the_lock_relay_is_not_run(
+    core: HomeAssistant, tmp_path: Any
+) -> None:
+    """#716: the run check asked a started script only what it moves, so a started script running
+    `scene.turn_on scene.porch` reached the relay the scene sets, while `scenes.activate scene.porch`
+    was refused. Each scene a started script activates is now asked the activation check. An id under
+    `scene.turn_on` that is not a scene is skipped, not refused. Control: the same chain to a scene
+    setting a plain switch runs."""
+    relay = await _source(core, "relay")
+    lamp = await _source(core, "lamp")
+    await _wrap(core, relay, "lock")
+    await hl.async_ensure_labels(core)
+    for scene, members in {"scene.porch": [relay], "scene.lamp": [lamp]}.items():
+        core.states.async_set(scene, "unknown", {"entity_id": members})
+    await _owner_scripts(
+        core,
+        tmp_path,
+        "a:\n  sequence:\n  - action: scene.turn_on\n    target:\n      entity_id: scene.porch\n"
+        "b:\n  sequence:\n  - action: scene.turn_on\n    target:\n      entity_id: scene.lamp, input_boolean.test\n"
+        "evening:\n  sequence:\n  - action: script.turn_on\n    target:\n      entity_id: script.a\n"
+        "calm:\n  sequence:\n  - action: script.turn_on\n    target:\n      entity_id: script.b\n",
+    )
+    for script in ("script.evening", "script.calm"):
+        _bare(core, script)
+        await hl.async_mark_hearth_scene(core, script, True)
+    ran = async_mock_service(core, "scene", "turn_on")
+    d = build_dispatcher(core)
+
+    got = await _err(d.dispatch("scenes.activate", {"entity_id": "scene.porch"}))
+    assert got is not None and got[0] == "method_not_allowed", got
+    got = await _err(d.dispatch("scripts.run", {"entity_id": "script.evening"}))
+    assert got is not None and got[0] == "method_not_allowed", got
+    assert relay not in got[1] and "lock" not in got[1], got
+    await core.async_block_till_done()
+    assert not ran
+    assert await _err(d.dispatch("scripts.run", {"entity_id": "script.calm"})) is None
+    await core.async_block_till_done()
+    assert [c.data["entity_id"] for c in ran] == [["scene.lamp", "input_boolean.test"]]
+
+
+@pytest.mark.parametrize("domain", ["script", "scene"])
+@pytest.mark.parametrize("target", ["all", "template", "area"])
+@pytest.mark.parametrize("gated", [True, False])
+async def test_a_started_script_that_starts_a_routine_it_cannot_name_is_refused_in_a_gated_home(
+    core: HomeAssistant, tmp_path: Any, domain: str, target: str, gated: bool
+) -> None:
+    """#716: a started script's `script.turn_on all`, or one by a template or an area, starts scripts
+    nobody walked, and the same for `scene.turn_on`. In a gated home that is unknowable and refused, as
+    `_selection_refusals` refuses such a target at the top level. Control: a home with no gated wrapper
+    runs it."""
+    await _porch(core)
+    if gated:
+        relay = await _source(core, "relay")
+        await _wrap(core, relay, "lock")
+    await hl.async_ensure_labels(core)
+    selector = {
+        "all": "      entity_id: all\n",
+        "template": "      entity_id: \"{{ '" + domain + ".' ~ 'x' }}\"\n",
+        "area": "      area_id: porch\n",
+    }[target]
+    await _owner_scripts(
+        core,
+        tmp_path,
+        f"a:\n  sequence:\n  - action: {domain}.turn_on\n    continue_on_error: true\n    target:\n{selector}"
+        "evening:\n  sequence:\n  - action: script.turn_on\n    target:\n      entity_id: script.a\n",
+    )
+    _bare(core, "script.evening")
+    await hl.async_mark_hearth_scene(core, "script.evening", True)
+    d = build_dispatcher(core)
+
+    if gated:
+        # Mocked, so a check that let it through fails here rather than really restarting `script.evening`.
+        async_mock_service(core, "script", "turn_on")
+        got = await _err(d.dispatch("scripts.run", {"entity_id": "script.evening"}))
+        assert got is not None and got[0] == "method_not_allowed" and "cannot be known" in got[1], got
+    else:
+        # Asked, not run: `script.turn_on all` would start `script.evening` again.
+        assert await script_run_violations(core, "script.evening") == []
+
+
+@pytest.mark.parametrize("shape", ["scene", "script", "area"])
+@pytest.mark.parametrize("gated", [True, False])
+async def test_a_started_script_reaching_a_gated_scene_through_homeassistant_turn_on_is_refused(
+    core: HomeAssistant, tmp_path: Any, shape: str, gated: bool
+) -> None:
+    """#716, Security on 7045002f: `homeassistant.turn_on` fans out like `scene.turn_on` and
+    `script.turn_on`, so a started script reached the scene through it: naming the scene, naming a
+    script that activates it, or by area. Control: a home with no gated wrapper answers []."""
+    await _porch(core)
+    relay = await _source(core, "relay")
+    if gated:
+        await _wrap(core, relay, "lock")
+    await hl.async_ensure_labels(core)
+    core.states.async_set("scene.porch", "unknown", {"entity_id": [relay]})
+    selector = {
+        "scene": "      entity_id: scene.porch\n",
+        "script": "      entity_id: script.b\n",
+        "area": "      area_id: porch\n",
+    }[shape]
+    await _owner_scripts(
+        core,
+        tmp_path,
+        f"a:\n  sequence:\n  - action: homeassistant.turn_on\n    target:\n{selector}"
+        "b:\n  sequence:\n  - action: scene.turn_on\n    target:\n      entity_id: scene.porch\n"
+        "evening:\n  sequence:\n  - action: script.turn_on\n    target:\n      entity_id: script.a\n",
+    )
+
+    found = await script_run_violations(core, "script.evening")
+    if gated:
+        assert found != [], shape
+        assert not any(relay in f or "lock" in f for f in found), found
+    else:
+        assert found == [], found
+
+
+async def test_a_lock_relay_put_into_a_blueprints_variables_is_refused(core: HomeAssistant) -> None:
+    """#716 item 2: in the validated pass a blueprint's `variables:` is a compiled `ScriptVariables`,
+    which the named-anywhere scan did not descend into. Control: before the relay is wrapped, the same
+    blueprint validates."""
+    relay = await _source(core, "relay")
+    cfg = _blueprint(core, "    target:\n      entity_id: input_boolean.test\n")
+    import pathlib  # noqa: PLC0415
+
+    body = pathlib.Path(core.config.path("blueprints/automation/hearth_gate/p.yaml"))
+    body.write_text(body.read_text().replace("variables:\n  w: !input w\n", f"variables:\n  w: !input w\n  door: {relay}\n"))
+    assert relay in body.read_text()
+    cfg["use_blueprint"]["input"] = {"w": "x"}
+    d = build_dispatcher(core)
+    assert (await d.dispatch("automations.validate", {"config": cfg}))["ok"] is True
+
+    await _wrap(core, relay, "lock")
+    assert _refused(await d.dispatch("automations.validate", {"config": cfg})) == GATED_NAMED
 
 
 @pytest.mark.parametrize("gated", [False, True])

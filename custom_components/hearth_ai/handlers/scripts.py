@@ -25,7 +25,9 @@ from ..policy import (
     TARGET_BEARING_KEYS,
     _data_is_variables,
     _service_name,
+    _domain,
     _target_selection,
+    fans_out,
     find_policy_violations,
     find_reference_violations,
 )
@@ -34,7 +36,15 @@ from .common import check_hearth_scene_kept, lock_for, plain, read_yaml, require
 from .registry import GateMap, _exposed, _gates
 from .resolve import resolve_registry_ids
 from .gated import find_gate_violations
-from .scenes import _script_raw_config, _script_targets, find_config_violations, find_nested_scene_violations, gated_refusals
+from .scenes import (
+    _config_for_entity,
+    _script_raw_config,
+    _script_targets,
+    find_config_violations,
+    find_nested_scene_violations,
+    find_scene_run_violations,
+    gated_refusals,
+)
 
 _SLUG = re.compile(r"^[a-z0-9_]+$")
 
@@ -194,6 +204,21 @@ def _selection_refusals(hass: HomeAssistant, gates: GateMap, config: Any) -> lis
     return problems + gated_refusals(gates, sorted(reached))
 
 
+def _script_key(hass: HomeAssistant, entity_id: str) -> str:
+    """The `scripts.yaml` key behind a script entity: its registry `unique_id` (#720).
+
+    Not the entity id's object id: an owner who renames a script's entity id in Home Assistant keeps
+    the key, and the label, so reading the key off the new id found no config and the script ran
+    unchecked. The split is the fallback only for an id the registry does not know.
+    """
+    # For a `scripts.yaml` script the `unique_id` is its key; a script defined elsewhere has no
+    # `scripts.yaml` config under any key and is skipped below, as before.
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is not None:
+        return str(entry.unique_id)
+    return entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+
+
 async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
     """
     Why a script Hearth presents as a scene may not run. Empty means it may.
@@ -217,7 +242,7 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
     The residual case is a restore *during* the run: the owner restores the deleted entity while the
     labelled script is partway through, in a `delay` say, and HA resolves the later step to it.
     """
-    key = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    key = _script_key(hass, entity_id)
     path = _path(hass)
     async with lock_for(path):
         data = await read_yaml(hass, path, {})
@@ -236,19 +261,63 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
     problems += await find_nested_scene_violations(hass, config)
     # And what a script it starts can do to a gated relay (#643): a scene that runs `script.turn_on` is
     # still a scene, and the started script is not checked when it runs (AgDR-0005).
-    problems += _started_script_gate_violations(hass, gates, config)
+    problems += await _started_script_gate_violations(hass, gates, config)
     return list(dict.fromkeys(problems))
 
 
-def _started_script_gate_violations(hass: HomeAssistant, gates: GateMap, config: Any) -> list[str]:
+async def _started_routine_violations(hass: HomeAssistant, gates: GateMap, config: Any, where: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """What a started script starts in turn, in a gated home: a scene it activates, and a target it cannot name (#716).
+
+    `find_gate_violations` asks a started script what it moves, not what it activates, so a started
+    script running `scene.turn_on scene.porch` reached a relay the scene sets while `scenes.activate`
+    of that scene was refused. Every action whose reach is decided by its target (`fans_out`:
+    `scene.turn_on`, every `script.*` that starts one, and `homeassistant.turn_on|turn_off|toggle`)
+    is followed. Each named scene is asked `find_scene_run_violations`, the activation check itself;
+    a script a `homeassistant.*` action names is returned for the caller to walk, since
+    `_script_targets` reads only `script.*` actions; any other id is skipped rather than refused, as a
+    started script that cannot be read is.
+
+    Such an action aimed at `all`, `none`, a template or an indirect selector (`area_id`, `device_id`,
+    `floor_id`, `label_id`) cannot be followed, so in a gated home it is refused as unknowable, as
+    `_selection_refusals` refuses such a target at the top level.
+    """
+    problems: list[str] = []
+    started: list[tuple[str, str]] = []
+    for action, node in _action_nodes(config):
+        action = action.lower()
+        if not fans_out(action):
+            continue
+        keys, ids, unknowable = _target_selection(node, action)
+        selected = _selector_values(node, action)
+        values = [v for vs in selected.values() for v in vs]
+        if (
+            unknowable
+            or any(k in keys for k in INDIRECT_TARGET_KEYS)
+            or any(_TEMPLATE_RE.search(v) or v.lower() in _MATCH_ANY for v in values)
+        ):
+            problems.append(UNKNOWABLE_TARGET)
+            continue
+        if _domain(action) == "script":
+            continue  # walked by the caller through `_script_targets`
+        for eid in dict.fromkeys(i.lower() for i in ids):
+            if eid.startswith("scene."):
+                problems += find_scene_run_violations(hass, eid, await _config_for_entity(hass, eid), gates)
+            elif eid.startswith("script.") and _domain(action) == "homeassistant":
+                started.append((eid, where))
+    return problems, started
+
+
+async def _started_script_gate_violations(hass: HomeAssistant, gates: GateMap, config: Any) -> list[str]:
     """The `switch_as_x` gate half of `find_nested_script_violations`, over every script a scene-script starts.
 
     **Only the gate half, and nothing in a home with no gated wrapper.** The authoring check fails closed
     on a script Home Assistant does not have, a missing blueprint or an unresolved registry id, and runs
     the literal walk; `script_run_violations` lets those run (AgDR-0044, #663), because at run time
     the script already exists, is exposed, and `routines.run` gates it. So only what #643 adds is asked
-    here: what each started script moves, and how it selects it (`find_gate_violations`, `nested`). A
-    script that cannot be read, or an id that is not a script, is skipped rather than refused.
+    here: what each started script moves, and how it selects it (`find_gate_violations`, `nested`), and
+    what it starts in turn (`_started_routine_violations`, #716): the scenes it activates, and a
+    script or scene it starts by a target that cannot be named. A script that cannot be read, or an id
+    that is not a script, is skipped rather than refused.
     """
     if gates.empty:
         return []
@@ -266,7 +335,9 @@ def _started_script_gate_violations(hass: HomeAssistant, gates: GateMap, config:
         where = f"{path}->{entity_id}"
         raw, _unresolved = resolve_registry_ids(hass, raw, where)  # unresolved is allowed at run time, as above
         problems += find_gate_violations(hass, raw, where, mode="nested", gates=gates)
-        todo += _script_targets(raw, where)
+        found, started = await _started_routine_violations(hass, gates, raw, where)
+        problems += found
+        todo += _script_targets(raw, where) + started
     return problems
 
 
@@ -310,7 +381,7 @@ async def _save(
     it, releasing the lock and writing later let two creates with the same name pick the same key,
     and the second overwrote the first (#173).
     """
-    # A key chosen from `new_from` is a free one, so nothing there carries the label yet.
+    # A key chosen from `new_from` is not known yet, so that create is checked below, once it is.
     if new_from is None:
         check_hearth_scene_kept(hass, _entity_id(hass, key), hearth_scene)
     result = await _validate(hass, key, config)
@@ -323,6 +394,10 @@ async def _save(
             raise RpcError("ha_error", "scripts.yaml is not a mapping")
         if new_from is not None:
             key = _free_key(hass, data, new_from)
+            # `_free_key` checks `scripts.yaml` and live states, not the registry, so the key may still
+            # carry a registry entry left by a labelled script deleted from the file, and the reload
+            # re-attaches it, label and all (#720). Checked before the write, as above.
+            check_hearth_scene_kept(hass, _entity_id(hass, key), hearth_scene)
         if must_exist and key not in data:
             raise RpcError("not_found", f"no editable script with id {key}")
         data[key] = config

@@ -98,6 +98,9 @@ def _strings(node: Any) -> Iterator[str]:
     elif isinstance(getattr(node, "template", None), str):
         # A `Template` in the validated pass: a blueprint's body arrives compiled, not as a string.
         yield node.template
+    elif isinstance(getattr(node, "variables", None), dict):
+        # A compiled `ScriptVariables` in the validated pass: a blueprint input put into `variables:` (#716).
+        yield from _strings(node.variables)
 
 
 def _candidates(text: str) -> Iterator[str]:
