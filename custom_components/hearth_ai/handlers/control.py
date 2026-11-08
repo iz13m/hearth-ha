@@ -136,11 +136,11 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
 
     # A remote command is sent or taught only to a remote whose integration plays stored names alone (#568, F1).
     # After `visible()`, so an id the model may not see is still refused as unknown rather than named.
-    if problems := remote_call_violations(hass, domain, service, raw_ids):
+    if problems := remote_call_violations(hass, domain, service, raw_ids, params.get("data")):
         raise RpcError("method_not_allowed", "; ".join(problems))
 
     for entity_id in raw_ids:
-        if problems := await member_violations(hass, domain, entity_id, gates, capabilities):
+        if problems := await member_violations(hass, domain, entity_id, gates, capabilities, params.get("data")):
             raise RpcError("method_not_allowed", "; ".join(problems))
 
     data = _clean_data(params.get("data"))
@@ -161,7 +161,7 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
 
 
 async def member_violations(
-    hass: HomeAssistant, domain: str, entity_id: str, gates: GateMap, capabilities: frozenset[str] | None = None
+    hass: HomeAssistant, domain: str, entity_id: str, gates: GateMap, capabilities: frozenset[str] | None = None, data: Any = None
 ) -> list[str]:
     """Why a service call on `entity_id` may not fan out to what it holds (#657). Empty means it may.
 
@@ -185,6 +185,12 @@ async def member_violations(
       AgDR-0012), exactly as `scenes.activate` asks.
     - **A script** must be shared with Assist and not hidden or disabled (#644), and one Hearth presents as a scene must pass its run
       check, exactly as `scripts.run` asks (AgDR-0005, AgDR-0044).
+    - **A script with data** is refused (#765). Home Assistant forwards the call's whole `data` to
+      `script.turn_on`, which reads it as the script's `variables`, so the caller would fill in the
+      templates of a script the household wrote: which remote it sends to, which activity it starts,
+      which entity it acts on. AgDR-0005's licence is for running the script as its owner wrote it.
+      `variables` is also refused by name in `find_service_call_violations`; this is the group half,
+      and it refuses any data, since `script.turn_on` takes nothing else a call needs.
     - **An automation** is refused: switching one on or off is `automations.set_enabled`'s alone, an
       app-only path, and `automation.turn_on`/`turn_off`/`toggle` are refused by name (AgDR-0042).
 
@@ -215,6 +221,8 @@ async def member_violations(
             problems.append(f"{entity_id}: this group holds {member}, and a valve is moved only by its own services")
         elif literal == "automation":
             problems.append(f"{entity_id}: this group holds {member}, and a call on the group would switch that automation on or off")
+        elif literal == "script" and data:
+            problems.append(f"{entity_id}: this group holds {member}, and a call on the group would pass its data to the script as variables; Hearth runs a household script only as it was written")
         elif literal in ("scene", "script") and capabilities is not None and "routines.run" not in capabilities:
             problems.append(f"{entity_id}: this group holds {member}, and a call on the group would run it; running scenes and scripts is disabled in the Azka AI options")
         elif literal in ("scene", "script") and hass.states.get(member) is not None:

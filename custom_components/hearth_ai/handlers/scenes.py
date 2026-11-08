@@ -19,7 +19,7 @@ from ..policy import _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
-from .remotes import find_remote_send_violations
+from .remotes import find_nested_remote_violations, find_remote_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, visible
 from .resolve import resolve_registry_ids
 
@@ -244,8 +244,8 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         # The two above are literal: a switch a `switch_as_x` helper presents as a lock, siren or valve
         # is a switch to them (#643). After registry ids are resolved, so a UUID is checked too.
         + find_gate_violations(hass, config, mode="authoring")
-        # Which remote a `remote.send_command` or `learn_command` reaches (#568, F1): box only, the hub cannot see platforms.
-        + find_remote_send_violations(hass, config)
+        # Which remote a `remote.send_command` or `learn_command` reaches (#568, F1), and which activity a remote starts (#765): box only, the hub cannot see platforms or state.
+        + find_remote_violations(hass, config)
         + await find_nested_authoring_violations(hass, config)
     )
 
@@ -397,6 +397,11 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         # What it can do to a switch a `switch_as_x` gate covers, by the same line (#643): the ids it
         # moves and how it selects them, not every id it mentions.
         problems.extend(find_gate_violations(hass, raw, where, mode="nested", gates=gates))
+        # A remote the caller can choose, by the same line (#765): a household `remote.send_command`
+        # with a templated target let the model pick which remote, an Android TV included, gets the
+        # household's fixed command. The platform allowlist is deliberately not applied here; see
+        # `find_nested_remote_violations` for why.
+        problems.extend(find_nested_remote_violations(raw, where))
         # Authoring: this walk only runs from `find_config_violations` (#713).
         problems.extend(await find_nested_scene_violations(hass, raw, authoring=True))
         for nested, _ in _script_targets(raw, where):

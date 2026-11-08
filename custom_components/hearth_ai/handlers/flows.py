@@ -32,7 +32,7 @@ from ..const import DOMAIN
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import RpcError
 from .gated import find_gate_violations
-from .remotes import find_remote_send_violations
+from .remotes import find_remote_violations
 from .resolve import resolve_registry_ids
 from .scenes import find_nested_authoring_violations
 from .registry import SWITCH_AS_X, _gates, _source_of, visible
@@ -510,8 +510,8 @@ async def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     # Literal, the two above. A form value naming a switch a `switch_as_x` gate covers is a new way to
     # move it: a group over the relay, or a template switch whose action calls it (#643, ruling 6).
     problems += find_gate_violations(hass, config, "input", mode="form")
-    # Which remote a `remote.send_command` or `learn_command` in a form value reaches (#568, F1), as for an automation.
-    problems += find_remote_send_violations(hass, config, "input")
+    # Which remote a `remote.send_command` or `learn_command` in a form value reaches (#568, F1), and which activity a remote starts (#765), as for an automation.
+    problems += find_remote_violations(hass, config, "input")
     # And what a scene or script the value activates would do (#721), asked exactly as it is of an
     # authored automation, over the resolved copy so a scene named by its registry id is read too.
     problems += await find_nested_authoring_violations(hass, config)

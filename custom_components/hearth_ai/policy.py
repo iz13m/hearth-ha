@@ -418,6 +418,40 @@ def _remote_command_problems(carriers: list[Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# A remote activity Hearth cannot read until it runs (#765). Mirror of REMOTE_ACTIVITY_SERVICES in
+# policy.ts. On HA 2026.9.3 `androidtv_remote` launches whatever `activity` names (an app it has a name
+# for, else the value itself as an app id or a URL), `toggle` reaches it through `async_toggle`, and
+# `homeassistant.turn_on`/`turn_off`/`toggle` forward their whole `data` to the remote's own service.
+# Here only what cannot be compared with the remote's own `activity_list` is refused (a template, a
+# non-string, a templated key, a whole templated `data`); the list itself is read on the box, in
+# `handlers/remotes.py`, which can see the target's state.
+_REMOTE_ACTIVITY_SERVICES: frozenset[str] = frozenset(
+    {"remote.turn_on", "remote.turn_off", "remote.toggle", "homeassistant.turn_on", "homeassistant.turn_off", "homeassistant.toggle"}
+)
+_REMOTE_ACTIVITY_RULE = "Hearth starts only a remote activity the remote itself lists, named literally"
+
+# Script variables on a direct call (#765). Mirror of VARIABLES_RULE in policy.ts. `homeassistant.turn_on`
+# on a group holding a script forwards its whole `data` to `script.turn_on`, whose `variables` fill in the
+# templates of a script the household wrote, so the caller would choose its targets. `devices.call` never
+# names a script itself (ROUTINE_DOMAINS), so no call it makes has a use for `variables`. The box also
+# refuses any data on a group that reaches a script (`control.member_violations`).
+_VARIABLES_RULE = "a call may not pass variables; Hearth runs a household script only as it was written"
+
+
+def _remote_activity_problems(carriers: list[Any]) -> list[str]:
+    """What is wrong with the `activity` in each carrier (`data`, `data_template`). Mirror of remoteActivityProblems."""
+    found: list[str] = []
+    for carrier in carriers:
+        if carrier is None:
+            continue
+        if not isinstance(carrier, dict) or _has_templated_key(carrier):
+            found.append(f"carries data Hearth cannot read until it runs, which could start a remote activity; {_REMOTE_ACTIVITY_RULE}")
+            continue
+        if "activity" in carrier and (not isinstance(carrier["activity"], str) or _TEMPLATE_RE.search(carrier["activity"])):
+            found.append(f"starts a remote activity Hearth cannot read until it runs; {_REMOTE_ACTIVITY_RULE}")
+    return list(dict.fromkeys(found))
+
+
 # Domains handled by their own capability, so device control never implicitly grants the
 # ability to run user-authored sequences.
 ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
@@ -462,6 +496,12 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
     # Raw remote codes (#568): see `_REMOTE_SEND_COMMAND`.
     if folded == _REMOTE_SEND_COMMAND:
         problems.extend(f"{full}: {problem}" for problem in _remote_command_problems([data]))
+    # A remote activity (#765): see `_REMOTE_ACTIVITY_SERVICES`.
+    if folded in _REMOTE_ACTIVITY_SERVICES:
+        problems.extend(f"{full}: {problem}" for problem in _remote_activity_problems([data]))
+    # Script variables (#765): see `_VARIABLES_RULE`.
+    if isinstance(data, dict) and "variables" in data:
+        problems.append(f"{full}: {_VARIABLES_RULE}")
     if not entity_ids:
         problems.append(f"{full}: at least one entity_id is required (broad targets are not allowed)")
     for eid in entity_ids:
@@ -805,6 +845,9 @@ def find_policy_violations(config: Any, path: str = "config", *, registry_ids_re
             # Raw remote codes (#568): see `_REMOTE_SEND_COMMAND`.
             if _fold(action) == _REMOTE_SEND_COMMAND:
                 problems.extend(f"{p}: action {action} {problem}" for problem in _remote_command_problems([node.get("data"), node.get("data_template")]))
+            # A remote activity (#765): see `_REMOTE_ACTIVITY_SERVICES`.
+            if _fold(action) in _REMOTE_ACTIVITY_SERVICES:
+                problems.extend(f"{p}: action {action} {problem}" for problem in _remote_activity_problems([node.get("data"), node.get("data_template")]))
             for eid in ids:
                 if _domain(eid) == VALVE_DOMAIN and dom != VALVE_DOMAIN:
                     problems.append(f"{p}: action {action} aimed at {eid} could open a valve; {_VALVE_CLOSING_RULE}")
