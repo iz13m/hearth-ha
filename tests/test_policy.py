@@ -932,6 +932,16 @@ def test_every_path_writing_service_is_classified() -> None:
     # everywhere, to everyone".
     ALL_DENIED_ACTIONS = (
         "automation.toggle", "automation.trigger", "automation.turn_off", "automation.turn_on",
+        "deconz.configure", "isy994.send_raw_node_command", "isy994.set_zwave_parameter", "knx.send",
+        "modbus.write_coil", "modbus.write_register", "pilight.send", "xiaomi_miio.remote_learn_command",
+        "zha.permit", "zha.remove", "homematic.put_paramset", "homematic.set_device_value",
+        "elkm1.alarm_arm_home_instant", "elkm1.alarm_arm_night_instant", "elkm1.alarm_arm_vacation",
+        "elkm1.alarm_bypass", "elkm1.alarm_clear_bypass", "elkm1.alarm_display_message",
+        "elkm1.sensor_zone_bypass", "elkm1.sensor_zone_trigger",
+        "insteon.add_all_link", "insteon.delete_all_link", "insteon.load_all_link_database",
+        "insteon.scene_off", "insteon.scene_on",
+        "lcn.lock_keys", "lcn.output_abs", "lcn.output_rel", "lcn.output_toggle", "lcn.pck",
+        "lcn.relays", "lcn.send_keys",
         "downloader.download_file", "group.reload", "group.remove", "group.set", "homeassistant.reload_all", "homeassistant.reload_config_entry",
         "homeassistant.reload_core_config", "homeassistant.restart", "homeassistant.set_location",
         "homeassistant.stop", "homematicip_cloud.dump_hap_config", "isy994.delete_zwave_lock_user_code",
@@ -1563,3 +1573,58 @@ def test_an_rfxtrx_device_trigger_is_allowed() -> None:
         "actions": [{"action": "light.turn_on", "target": {"entity_id": "light.hall"}}],
     }
     assert find_policy_violations(automation) == []
+
+
+# The rest of #581's raw-address sweep, and ZHA's remove and permit (#672). Literal on this side too,
+# so deleting an entry from policy.py fails here and not only in the TypeScript suite.
+_RAW_ADDRESS_SWEEP = (
+    "deconz.configure",
+    "modbus.write_register",
+    "modbus.write_coil",
+    "knx.send",
+    "isy994.send_raw_node_command",
+    "isy994.set_zwave_parameter",
+    "pilight.send",
+    "xiaomi_miio.remote_learn_command",
+    "homematic.set_device_value",
+    "homematic.put_paramset",
+    "elkm1.alarm_bypass",
+    "elkm1.alarm_clear_bypass",
+    "elkm1.alarm_arm_home_instant",
+    "elkm1.alarm_arm_night_instant",
+    "elkm1.alarm_arm_vacation",
+    "elkm1.alarm_display_message",
+    "elkm1.sensor_zone_bypass",
+    "elkm1.sensor_zone_trigger",
+    "lcn.pck",
+    "lcn.relays",
+    "lcn.output_abs",
+    "lcn.output_rel",
+    "lcn.output_toggle",
+    "lcn.send_keys",
+    "lcn.lock_keys",
+    "insteon.add_all_link",
+    "insteon.delete_all_link",
+    "insteon.load_all_link_database",
+    "insteon.scene_on",
+    "insteon.scene_off",
+    "zha.remove",
+    "zha.permit",
+)
+
+
+def test_the_raw_address_sweep_is_refused_on_authoring_and_control() -> None:
+    """Mirror of `the rest of #581's raw-address sweep` in policy.test.ts."""
+    for service in _RAW_ADDRESS_SWEEP:
+        assert service in DENIED_ACTIONS
+        expected = [f"config.actions[0]: action {service} is not allowed"]
+        assert find_policy_violations({"actions": [{"action": service, "data": {}}]}) == expected
+        assert find_policy_violations({"actions": [{"action": service, "target": {"device_id": "front_door_lock"}}]}) == expected
+        domain, name = service.split(".", 1)
+        assert find_service_call_violations(domain, name, ["binary_sensor.front_door_lock_door"], {}) == [f"{service}: not allowed"]
+
+
+def test_the_raw_address_sweep_spares_the_same_integrations_ordinary_services() -> None:
+    for service in ("zha.reconfigure_device", "xiaomi_miio.remote_set_led_off", "isy994.send_node_command", "modbus.reload", "knx.read",
+                    "elkm1.sensor_counter_refresh", "elkm1.speak_phrase", "lcn.var_reset", "insteon.print_all_link_database"):
+        assert find_policy_violations({"actions": [{"action": service, "target": {"device_id": "hall_switch"}}]}) == [], service

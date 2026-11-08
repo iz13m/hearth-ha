@@ -175,6 +175,48 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         # ZHA's `warn` and `squawk` device actions call them too, through `DEVICE_ACTION_SERVICES`.
         "zha.warning_device_squawk",
         "zha.warning_device_warn",
+        # #581 option A, the rest of the issue's sweep (HA 2026.9.3 `services.yaml`): each writes to a
+        # device by bus address, register, group address, raw frame or gateway path, so it names no
+        # lock, alarm or siren entity. ESPHome's per-device actions cannot be listed; option B's case.
+        "deconz.configure",
+        "modbus.write_register",
+        "modbus.write_coil",
+        "knx.send",
+        "isy994.send_raw_node_command",
+        "isy994.set_zwave_parameter",
+        "pilight.send",
+        "xiaomi_miio.remote_learn_command",
+        # Same class: Homematic writes a datapoint or a whole paramset by bus address and channel,
+        # so a Homematic lock is reached without naming its `lock.*` entity.
+        "homematic.set_device_value",
+        "homematic.put_paramset",
+        # Found by Security on this branch: ElkM1's alarm and zone services (aimed at a device or an
+        # area they name no `alarm_control_panel.*` entity), LCN's raw PCK, outputs, relays and keys
+        # by module address, and Insteon's all-link groups, which can include a lock.
+        "elkm1.alarm_bypass",
+        "elkm1.alarm_clear_bypass",
+        "elkm1.alarm_arm_home_instant",
+        "elkm1.alarm_arm_night_instant",
+        "elkm1.alarm_arm_vacation",
+        "elkm1.alarm_display_message",
+        "elkm1.sensor_zone_bypass",
+        "elkm1.sensor_zone_trigger",
+        "lcn.pck",
+        "lcn.relays",
+        "lcn.output_abs",
+        "lcn.output_rel",
+        "lcn.output_toggle",
+        "lcn.send_keys",
+        "lcn.lock_keys",
+        "insteon.add_all_link",
+        "insteon.delete_all_link",
+        "insteon.load_all_link_database",
+        "insteon.scene_on",
+        "insteon.scene_off",
+        # #672: `zha.remove {ieee}` takes a siren or an alarm's contact sensor off the network by IEEE
+        # address alone; `zha.permit` opens the network to any device joining.
+        "zha.remove",
+        "zha.permit",
         # #643, ruling 9: an old-style group's members, changed while it runs. `group.set` can add a
         # lock's relay to a group an automation already turns on, and Hearth reads a group's gate off
         # its members only when it is asked. Not reachable through `devices.call` on the pinned
