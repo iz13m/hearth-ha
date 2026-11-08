@@ -258,6 +258,15 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "group.set",
         "group.remove",
         "group.reload",
+        # #731: a model sends no media off the box. `immich.upload_file` uploads a local media item
+        # (stills an owner's automation saved) to the Immich server; `google_photos.upload` uploads
+        # files within the allowed paths to Google Photos, and `onedrive.upload` to a OneDrive folder.
+        "immich.upload_file",
+        "google_photos.upload",
+        "onedrive.upload",
+        # And `onedrive.delete`: a model has no reason to delete files, and OneDrive is also a backup
+        # agent, so it can wipe the household's off-box backups.
+        "onedrive.delete",
     }
 )
 # A device action whose `type` calls a service by another name (#662), keyed by folded `domain.type`.
@@ -696,7 +705,17 @@ def find_reference_violations(value: Any, path: str = "input") -> list[str]:
     return list(dict.fromkeys(problems))
 
 
-def find_policy_violations(config: Any, path: str = "config") -> list[str]:
+def find_policy_violations(config: Any, path: str = "config", *, registry_ids_resolved: bool = False) -> list[str]:
+    """Human-readable violations for an automation or script config ([] = allowed). Mirror of `findPolicyViolations`.
+
+    `registry_ids_resolved` is the box's one departure from the hub's walk, and only a caller that has
+    already resolved entity registry ids (`handlers/resolve.py`) may pass it (#663). Such a caller has
+    its own rule for an id that did not resolve: authoring refuses it in the resolver, without repeating
+    a value that can be a BLE key in a flow form, and the run-time check on a labelled script lets it
+    run, because HA's call raises on it and so reaches nothing (`scripts.script_run_violations`).
+    Without it a registry id in a fan-out target is refused, as on the hub, which has no registry to
+    resolve one against; that is the walk `POLICY_WALK_CASES` pins.
+    """
     problems: list[str] = []
 
     def visit(node: Any, p: str) -> None:
@@ -735,7 +754,7 @@ def find_policy_violations(config: Any, path: str = "config") -> list[str]:
                     problems.append(f"{p}: entity {eid} is in denied domain {_domain(eid)}")
             # An action that decides its own blast radius from its target (#220). After the
             # denied-domain sweep above, which still applies to whatever ids it does name.
-            problems.extend(find_fan_out_violations(action, node, ids, p))
+            problems.extend(find_fan_out_violations(action, node, ids, p, registry_ids_resolved=registry_ids_resolved))
         # A device action names no entity and carries no service: `{device_id, domain: "lock",
         # type: "unlock"}` has no `action` key at all, so everything above skips it while HA still
         # opens the door. The check is therefore on the shape and sits outside the action branch.
@@ -779,6 +798,12 @@ INDIRECT_TARGET_KEYS = ("device_id", "area_id", "floor_id", "label_id")
 
 # A group's membership lives in Home Assistant, so a `group.*` id is as unresolvable as an area.
 _GROUP_DOMAIN = "group"
+
+# An entity registry id (#663). Mirror of `REGISTRY_ID_RE` in policy.ts, whose comment says why a
+# fan-out action may not be aimed at one: it carries no domain to check. Lower-case only, as HA's
+# `_FAKE_UUID_4_HEX` (`helpers/config_validation.py`) is. The box resolves these before it walks an
+# authored config (`handlers/resolve.py`), so on the box this rule sees only an id that did not resolve.
+_REGISTRY_ID = re.compile(r"[0-9a-f]{32}")
 
 
 def fans_out(action: str) -> bool:
@@ -831,8 +856,12 @@ def _target_selection(node: dict[str, Any], action: str) -> tuple[set[str], list
     return keys, ids, unknowable
 
 
-def find_fan_out_violations(action: str, node: dict[str, Any], ids: list[str], p: str) -> list[str]:
+def find_fan_out_violations(action: str, node: dict[str, Any], ids: list[str], p: str, *, registry_ids_resolved: bool = False) -> list[str]:
     """What a fan-out action may not carry: a target we cannot resolve, and so cannot check.
+
+    An entity registry id is one (#663), as on the hub; see `_REGISTRY_ID`. `registry_ids_resolved`
+    is for a caller that has already resolved them (`handlers/resolve.py`) and has its own rule for
+    one that did not: see `find_policy_violations`.
 
     A refusal rather than a resolution, deliberately. Neither side can resolve an `area_id` at
     authoring time to a set that stays true afterwards — someone re-labelling a camera would change
@@ -865,6 +894,12 @@ def find_fan_out_violations(action: str, node: dict[str, Any], ids: list[str], p
             problems.append(
                 f"{p}: action {action} decides what it touches from its target, and {eid} is a "
                 "template; what it would reach cannot be known until it runs"
+            )
+            continue
+        if not registry_ids_resolved and _REGISTRY_ID.fullmatch(eid):
+            problems.append(
+                f"{p}: action {action} decides what it touches from its target, and {eid} is an entity "
+                "registry id, which names no domain to check; name the entity"
             )
             continue
         ed = _domain(eid)

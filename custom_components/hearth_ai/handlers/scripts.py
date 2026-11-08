@@ -250,7 +250,8 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
     if config is None:
         return []
     config, _unresolved = resolve_registry_ids(hass, config)  # unresolved is allowed, see above
-    problems = find_policy_violations(config) + find_reference_violations(config, "config")
+    # Resolved above, and an id that did not resolve is allowed at run time, so the walker is told (#663).
+    problems = find_policy_violations(config, registry_ids_resolved=True) + find_reference_violations(config, "config")
     # Literal, the two above: a switch a `switch_as_x` helper presents as a lock, siren or valve, or a
     # group over one, is just a switch to them (#643). Every id-shaped string counts, a condition's
     # included: this is a scene, and a scene is refused for what it touches.

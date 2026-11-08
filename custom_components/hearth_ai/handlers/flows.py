@@ -303,7 +303,9 @@ async def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     read what a scene or a script holds.
     """
     config, problems = resolve_registry_ids(hass, config, "input", any_key=True)
-    problems += find_policy_violations(config, "input") + find_reference_violations(config, "input")
+    # Resolved, and what did not resolve is refused above without repeating the value, which can be a
+    # BLE key here; so the walker, which would name it, is told (#663).
+    problems += find_policy_violations(config, "input", registry_ids_resolved=True) + find_reference_violations(config, "input")
     # Literal, the two above. A form value naming a switch a `switch_as_x` gate covers is a new way to
     # move it: a group over the relay, or a template switch whose action calls it (#643, ruling 6).
     problems += find_gate_violations(hass, config, "input", mode="form")

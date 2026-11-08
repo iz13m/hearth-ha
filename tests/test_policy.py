@@ -968,6 +968,7 @@ def test_every_path_writing_service_is_classified() -> None:
         "zwave_js.get_users", "zwave_js.invoke_cc_api", "zwave_js.multicast_set_value",
         "zwave_js.set_config_parameter", "zwave_js.set_credential", "zwave_js.set_lock_configuration",
         "zwave_js.set_lock_usercode", "zwave_js.set_user", "zwave_js.set_value",
+        "immich.upload_file", "google_photos.upload", "onedrive.upload", "onedrive.delete",
     )
     for service in ALL_DENIED_ACTIONS:
         assert service in DENIED_ACTIONS, (
@@ -1633,3 +1634,39 @@ def test_the_raw_address_sweep_spares_the_same_integrations_ordinary_services() 
     for service in ("zha.reconfigure_device", "xiaomi_miio.remote_set_led_off", "isy994.send_node_command", "modbus.reload", "knx.read",
                     "elkm1.sensor_counter_refresh", "elkm1.speak_phrase", "lcn.var_reset", "insteon.print_all_link_database"):
         assert find_policy_violations({"actions": [{"action": service, "target": {"device_id": "hall_switch"}}]}) == [], service
+
+
+_SIREN_REGISTRY_ID = "4f3c2b1a09e8d7c6b5a4938271605f4e"
+
+
+def test_a_registry_id_in_a_fan_out_target_is_refused_unresolved() -> None:
+    """Mirror of `an entity registry id in a fan-out target (#663)` in policy.test.ts.
+
+    The walk itself, before any resolution: what the hub does, since it has no registry. On the box
+    the authoring checks read the resolved copy (`handlers/resolve.py`), so this fires there only on an
+    id that did not resolve, which the resolver refuses as well.
+    """
+    for action in ("homeassistant.turn_on", "homeassistant.turn_off", "homeassistant.toggle", "script.turn_on", "scene.turn_on"):
+        assert find_policy_violations({"actions": [{"action": action, "target": {"entity_id": _SIREN_REGISTRY_ID}}]}) == [
+            f"config.actions[0]: action {action} decides what it touches from its target, and {_SIREN_REGISTRY_ID} is an "
+            "entity registry id, which names no domain to check; name the entity"
+        ], action
+    # Bounded by its own domain: `light.turn_on` reaches lights only, whatever the id names.
+    assert find_policy_violations({"actions": [{"action": "light.turn_on", "target": {"entity_id": _SIREN_REGISTRY_ID}}]}) == []
+    # What HA's device editor writes.
+    assert find_policy_violations({"actions": [{"device_id": "abc", "domain": "light", "entity_id": _SIREN_REGISTRY_ID, "type": "turn_off"}]}) == []
+
+
+def test_a_caller_that_resolved_registry_ids_is_not_refused_one_twice() -> None:
+    """`registry_ids_resolved=True` is for the run-time check on a labelled script, which lets a stale id
+    run because HA's call raises on it (`scripts.script_run_violations`). It turns off that rule and no other."""
+    stale = {"actions": [{"action": "homeassistant.turn_on", "target": {"entity_id": _SIREN_REGISTRY_ID}}]}
+    assert find_policy_violations(stale)
+    assert find_policy_violations(stale, registry_ids_resolved=True) == []
+    # Everything else still applies: an area on the generic alias, a group, a siren by name.
+    for node in (
+        {"action": "homeassistant.turn_on", "target": {"area_id": "hall"}},
+        {"action": "homeassistant.turn_on", "target": {"entity_id": ["group.doors", _SIREN_REGISTRY_ID]}},
+        {"action": "homeassistant.turn_on", "target": {"entity_id": ["siren.hall", _SIREN_REGISTRY_ID]}},
+    ):
+        assert find_policy_violations({"actions": [node]}, registry_ids_resolved=True), node

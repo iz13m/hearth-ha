@@ -234,6 +234,9 @@ async def test_a_started_script_is_resolved_too(core: HomeAssistant, tmp_path: P
     res = await d.dispatch("automations.validate", {"config": _automation({"action": "script.turn_on", "target": {"entity_id": "script.stale"}})})
     assert res["ok"] is False and res["status"] == "policy", res
     assert "cannot resolve" in res["error"] and "->script.stale" in res["error"], res
+    # Once, by the resolver: the walker reads the resolved copy and is told so, rather than refusing
+    # the same id again under its own wording, which names it (#663).
+    assert gone not in res["error"], res
 
 
 async def test_an_activated_scene_is_resolved_too(core: HomeAssistant) -> None:
@@ -263,6 +266,12 @@ async def test_a_flow_form_value_is_resolved(core: HomeAssistant) -> None:
         await check_flow_input(core, {"name": "Gone", "entity_id": NEVER_EXISTED})
     assert "cannot resolve" in ei.value.message
     await check_flow_input(core, {"name": "Kitchen", "entity_id": light})
+    # A template switch's action aimed at an id that does not resolve. Refused by the resolver, which
+    # does not repeat the value (it can be a BLE key in a form); the policy walker, which would name
+    # it ("is an entity registry id"), is told the id was resolved and stays quiet (#663).
+    with pytest.raises(RpcError) as ei:
+        await check_flow_input(core, {"name": "Gone", "turn_on": [{"action": "homeassistant.turn_on", "target": {"entity_id": NEVER_EXISTED}}]})
+    assert "cannot resolve" in ei.value.message and NEVER_EXISTED not in ei.value.message
 
 
 async def test_a_form_value_is_resolved_under_any_key_but_a_device_id_is_left_alone(core: HomeAssistant) -> None:

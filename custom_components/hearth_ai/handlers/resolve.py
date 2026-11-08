@@ -35,8 +35,12 @@ in a device action or condition costs nothing new: HA already disables a script 
 returns a new structure and never edits its input, so the owner's YAML keeps the ids HA's editor put
 there.
 
-The hub does **not** resolve, deliberately: it has no entity registry. Its walkers see a registry id
-as an id with no domain and pass it, so the box is the only side that refuses one.
+The hub does **not** resolve: it has no entity registry. So both walkers refuse a registry id in the
+target of an action whose reach the target decides (`homeassistant.turn_on`, `scene.turn_on`, the
+`script` domain), as they refuse an `area_id` there; elsewhere a registry id is bounded by the
+action's own domain and passes. Every caller here walks the resolved copy and has its own rule for an
+id that did not resolve (refused above at authoring, allowed at run time), so each tells the walker
+(`find_policy_violations(..., registry_ids_resolved=True)`) rather than have it refuse one twice.
 """
 
 from __future__ import annotations

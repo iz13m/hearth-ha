@@ -187,7 +187,8 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
     config, unresolved = resolve_registry_ids(hass, config)  # #663: checks read the resolved copy
     return (
         unresolved
-        + find_policy_violations(config)
+        # Resolved, and the resolver has refused what did not resolve, so the walker is told (#663).
+        + find_policy_violations(config, registry_ids_resolved=True)
         + find_reference_violations(config, "config")
         # The two above are literal: a switch a `switch_as_x` helper presents as a lock, siren or valve
         # is a switch to them (#643). After registry ids are resolved, so a UUID is checked too.
@@ -339,7 +340,7 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         # notification, and took every Hearth automation that calls that script with it. Reading
         # whether a lock is locked is not reaching a lock: `HIDDEN_DOMAINS` already stops the model
         # learning the state, and the household wrote the condition themselves.
-        problems.extend(find_policy_violations(raw, where))
+        problems.extend(find_policy_violations(raw, where, registry_ids_resolved=True))
         # What it can do to a switch a `switch_as_x` gate covers, by the same line (#643): the ids it
         # moves and how it selects them, not every id it mentions.
         problems.extend(find_gate_violations(hass, raw, where, mode="nested", gates=gates))
