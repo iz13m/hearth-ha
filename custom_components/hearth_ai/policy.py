@@ -105,6 +105,13 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         # camera reached through another domain's service. Service-level, ruled by the owner (#554):
         # the named vacuum services (`start`, `return_to_base`, `clean_area`, …) stay allowed.
         "vacuum.send_command",
+        # #764: sends any SSAP request the caller names (`ssap://<command>`) with any payload to an LG
+        # webOS TV and returns the TV's answer (`webostv/media_player.py` `async_command` ->
+        # `aiowebostv` `request`, `SupportsResponse.OPTIONAL`). That is the TV's whole API: launching
+        # any app, a doorbell or camera feed's included, and reading what the TV answers. The other
+        # two webOS services stay: `button` writes one line to the pointer-input socket, which takes
+        # only key presses and cursor moves, and `select_sound_output` calls one fixed endpoint.
+        "webostv.command",
         # Puts a whole Lovelace dashboard on a Cast device (#536, found by Security). The receiver
         # signs in as the Cast system user, which `cast/home_assistant_cast.py` creates in the admin
         # group, so the television renders whatever the view holds, camera cards and lock tiles
@@ -715,8 +722,12 @@ template and read it through an exposable sensor (#566). `find_service_call_viol
 target ids on this list too, because `devices.call` answers with its targets' state.
 """
 
-HOST_SERVICE_DOMAINS: frozenset[str] = frozenset({"shell_command", "python_script", "hassio", "backup"})
-"""Service domains that are host-level wherever they appear, including inside a template string."""
+HOST_SERVICE_DOMAINS: frozenset[str] = frozenset({"shell_command", "python_script", "hassio", "backup", "androidtv"})
+"""Service domains that are host-level wherever they appear, including inside a template string.
+
+`androidtv` is also in `DENIED_ACTION_DOMAINS` (#766); it is here too so that a form value or a
+template that merely names `androidtv.adb_command` is refused by the reference scan, a backstop for a
+service assembled where the action walk does not look (#764)."""
 
 # `IGNORECASE`, because this one reads raw text rather than a parsed id: `Lock.Front_Door` names the
 # same entity HA will open, and a case-sensitive pattern is blind to it (#220).

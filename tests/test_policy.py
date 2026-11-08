@@ -880,9 +880,15 @@ def test_every_path_writing_service_is_classified() -> None:
     # failure message saying "find the new name rather than removing the entry" is guidance; this
     # is the check. Named literally, because a check that reads its own table cannot see the table
     # shrink.
-    for domain in ("shell_command", "python_script", "hassio", "backup"):
+    # `androidtv` joined as a reference-scan backstop (#764), with a ratchet so a later one is pinned.
+    ALL_HOST_SERVICE_DOMAINS = ("shell_command", "python_script", "hassio", "backup", "androidtv")
+    for domain in ALL_HOST_SERVICE_DOMAINS:
         assert domain in HOST_SERVICE_DOMAINS, f"{domain} dropped from HOST_SERVICE_DOMAINS"
         assert domain in DENIED_ACTION_DOMAINS, f"{domain} dropped from DENIED_ACTION_DOMAINS"
+    assert set(ALL_HOST_SERVICE_DOMAINS) == set(HOST_SERVICE_DOMAINS), (
+        "HOST_SERVICE_DOMAINS changed; add the new domain to ALL_HOST_SERVICE_DOMAINS so it is "
+        f"pinned literally. Unpinned: {sorted(set(HOST_SERVICE_DOMAINS) - set(ALL_HOST_SERVICE_DOMAINS))}"
+    )
 
     # **Every** member, not the four this PR happened to name. Pinning only the four it touched
     # left ten of sixteen deletable with the suite green — `device_tracker` the sharpest, because
@@ -957,7 +963,7 @@ def test_every_path_writing_service_is_classified() -> None:
         "persistent_notification.dismiss_all", "remote.delete_command",
         "rflink.send_command", "rfxtrx.send", "schlage.add_code",
         "schlage.delete_code", "schlage.get_codes", "subaru.unlock_specific_door", "system_log.write",
-        "telegram_bot.download_file", "vacuum.send_command", "verisure.disable_autolock",
+        "telegram_bot.download_file", "vacuum.send_command", "webostv.command", "verisure.disable_autolock",
         "verisure.enable_autolock", "zha.clear_lock_user_code", "zha.disable_lock_user_code",
         "zha.enable_lock_user_code", "zha.issue_zigbee_cluster_command",
         "zha.issue_zigbee_group_command", "zha.set_lock_user_code", "zha.set_zigbee_cluster_attribute",
@@ -1389,6 +1395,45 @@ def test_the_named_vacuum_services_stay_allowed() -> None:
         assert find_service_call_violations("vacuum", service, ["vacuum.downstairs"]) == [], service
         action = {"action": f"vacuum.{service}", "target": {"entity_id": "vacuum.downstairs"}}
         assert find_policy_violations({"actions": [action]}) == [], service
+
+
+_WEBOSTV_SENT = (
+    {"command": "system.launcher/launch", "payload": {"id": "com.ring.app"}},
+    {"command": "com.webos.service.tvpower/power/turnOffScreen"},
+)
+
+
+def test_a_webostv_raw_ssap_request_is_refused_on_control_and_on_authoring() -> None:
+    """Mirror of `webostv.command (#764)` in policy.test.ts."""
+    assert "webostv.command" in DENIED_ACTIONS
+    for data in _WEBOSTV_SENT:
+        assert find_service_call_violations("webostv", "command", ["media_player.lg_tv"], data) == [
+            "webostv.command: not allowed"
+        ]
+        action = {"action": "webostv.command", "target": {"entity_id": "media_player.lg_tv"}, "data": data}
+        assert find_policy_violations({"actions": [action]}) == [
+            "config.actions[0]: action webostv.command is not allowed"
+        ]
+
+
+def test_the_webostv_key_presses_and_media_player_stay_allowed() -> None:
+    for domain, service, data in (
+        ("webostv", "button", {"button": "HOME"}),
+        ("webostv", "select_sound_output", {"sound_output": "external_speaker"}),
+        ("media_player", "volume_up", None),
+    ):
+        assert find_service_call_violations(domain, service, ["media_player.lg_tv"]) == [], service
+        action = {"action": f"{domain}.{service}", "target": {"entity_id": "media_player.lg_tv"}}
+        if data is not None:
+            action["data"] = data
+        assert find_policy_violations({"actions": [action]}) == [], service
+
+
+def test_an_androidtv_service_named_in_a_form_value_is_refused() -> None:
+    """The #766 backstop (#764): `androidtv` is a host-level domain for the reference scan."""
+    assert "androidtv" in HOST_SERVICE_DOMAINS
+    assert find_reference_violations({"value_template": "{{ 'androidtv.adb_command' }}"}) != []
+    assert find_reference_violations({"entity_id": "media_player.my_androidtv"}) == []
 
 
 # #581 option A, Security's lock-entity sweep. Every row targets the lock **indirectly**: a row aimed at
