@@ -326,7 +326,7 @@ async def helpers_create(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     # The wrapper's source first: it answers a source the model cannot see in a ghost's words (ruling
     # 4), and the form check below would otherwise answer a lock's relay in words of its own (#643).
     check_switch_as_x_source(hass, domain, config)
-    check_flow_input(hass, config)
+    await check_flow_input(hass, config)
 
     if domain in INPUT_DOMAINS:
         store = _collection(hass, domain)
@@ -394,7 +394,7 @@ async def helpers_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     config = params.get("config")
     if not isinstance(config, dict):
         raise RpcError("invalid_params", "config must be an object")
-    check_flow_input(hass, config)
+    await check_flow_input(hass, config)
 
     split = _split_input_id(helper_id)
     if split is None:

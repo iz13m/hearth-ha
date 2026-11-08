@@ -126,7 +126,7 @@ async def integrations_flow_step(hass: HomeAssistant, params: dict[str, Any]) ->
     check_switch_as_x_source(hass, domain, user_input)
     # A form field can be an action sequence — Home Assistant's `template` helper takes whole ones,
     # and really runs them — so it is policed like the authoring surface it is (AgDR-0038).
-    check_flow_input(hass, user_input)
+    await check_flow_input(hass, user_input)
 
     try:
         async with asyncio.timeout(FLOW_TIMEOUT_S):

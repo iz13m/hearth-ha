@@ -33,6 +33,7 @@ from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import RpcError
 from .gated import find_gate_violations
 from .resolve import resolve_registry_ids
+from .scenes import find_nested_authoring_violations
 from .registry import SWITCH_AS_X, _gates, _source_of, visible
 
 _LOGGER = logging.getLogger(__name__)
@@ -290,18 +291,25 @@ def check_secrets(hass: HomeAssistant, flow_id: str, user_input: dict[str, Any])
         )
 
 
-def check_flow_input(hass: HomeAssistant, config: Any) -> None:
+async def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     """The action policy, applied to form values exactly as it is to an authored automation.
 
     See the module docstring for why a form field needs this at all. The hub refuses the same input
     before it leaves (`flowInputPolicyCheck` in methods.ts); neither side is the only guard. Registry
     ids are resolved first (#663), under any key, since an `EntitySelector` field can have any name.
+
+    It also checks, one hop away, the scene a value activates and the script it starts (#721), as
+    `find_config_violations` does for an automation. That half has no hub mirror: only the box can
+    read what a scene or a script holds.
     """
     config, problems = resolve_registry_ids(hass, config, "input", any_key=True)
     problems += find_policy_violations(config, "input") + find_reference_violations(config, "input")
     # Literal, the two above. A form value naming a switch a `switch_as_x` gate covers is a new way to
     # move it: a group over the relay, or a template switch whose action calls it (#643, ruling 6).
     problems += find_gate_violations(hass, config, "input", mode="form")
+    # And what a scene or script the value activates would do (#721), asked exactly as it is of an
+    # authored automation, over the resolved copy so a scene named by its registry id is read too.
+    problems += await find_nested_authoring_violations(hass, config)
     if problems:
         raise RpcError("validation_failed", "Hearth will not save that: " + "; ".join(problems[:10]))
 

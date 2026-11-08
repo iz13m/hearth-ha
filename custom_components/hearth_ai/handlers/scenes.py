@@ -189,9 +189,19 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         # The two above are literal: a switch a `switch_as_x` helper presents as a lock, siren or valve
         # is a switch to them (#643). After registry ids are resolved, so a UUID is checked too.
         + find_gate_violations(hass, config, mode="authoring")
-        + await find_nested_scene_violations(hass, config, authoring=True)
-        + await find_nested_script_violations(hass, config)
+        + await find_nested_authoring_violations(hass, config)
     )
+
+
+async def find_nested_authoring_violations(hass: HomeAssistant, config: Any) -> list[str]:
+    """What an authored config would reach one hop away: a scene it activates, a script it starts.
+
+    One place for the pair, and for the `authoring=True` flag (#713), because two surfaces author an
+    action sequence: an automation or script (`find_config_violations`) and a config-flow form value
+    such as a template switch's `turn_on` (`flows.check_flow_input`, #721). Neither may reach what
+    the other refuses.
+    """
+    return await find_nested_scene_violations(hass, config, authoring=True) + await find_nested_script_violations(hass, config)
 
 
 # Starting a script is every `script.*` service except these two, plus the per-script service Home

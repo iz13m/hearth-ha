@@ -255,12 +255,12 @@ async def test_a_flow_form_value_is_resolved(core: HomeAssistant) -> None:
     lock = _registry_id(core, "lock", "front_door")
     light = _registry_id(core, "light", "kitchen")
     with pytest.raises(RpcError) as ei:
-        check_flow_input(core, {"name": "Door", "entity_id": lock})
+        await check_flow_input(core, {"name": "Door", "entity_id": lock})
     assert ei.value.code == "validation_failed" and "lock.front_door" in ei.value.message
     with pytest.raises(RpcError) as ei:
-        check_flow_input(core, {"name": "Gone", "entity_id": NEVER_EXISTED})
+        await check_flow_input(core, {"name": "Gone", "entity_id": NEVER_EXISTED})
     assert "cannot resolve" in ei.value.message
-    check_flow_input(core, {"name": "Kitchen", "entity_id": light})
+    await check_flow_input(core, {"name": "Kitchen", "entity_id": light})
 
 
 async def test_a_form_value_is_resolved_under_any_key_but_a_device_id_is_left_alone(core: HomeAssistant) -> None:
@@ -277,11 +277,11 @@ async def test_a_form_value_is_resolved_under_any_key_but_a_device_id_is_left_al
     assert len(device) == 32
 
     with pytest.raises(RpcError) as ei:
-        check_flow_input(core, {"name": "Door", "source": lock})
+        await check_flow_input(core, {"name": "Door", "source": lock})
     assert ei.value.code == "validation_failed" and "lock.front_door" in ei.value.message
-    check_flow_input(core, {"name": "Hub", "device": device})
+    await check_flow_input(core, {"name": "Hub", "device": device})
     with pytest.raises(RpcError) as ei:
-        check_flow_input(core, {"name": "Gone", "device": NEVER_EXISTED})
+        await check_flow_input(core, {"name": "Gone", "device": NEVER_EXISTED})
     assert "cannot resolve" in ei.value.message and NEVER_EXISTED not in ei.value.message
 
 
