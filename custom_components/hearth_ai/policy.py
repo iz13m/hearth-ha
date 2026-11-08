@@ -10,6 +10,7 @@ import re
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import unquote
 
 DENIED_ACTION_DOMAINS: frozenset[str] = frozenset(
     {
@@ -100,6 +101,37 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         # camera reached through another domain's service. Service-level, ruled by the owner (#554):
         # the named vacuum services (`start`, `return_to_base`, `clean_area`, …) stay allowed.
         "vacuum.send_command",
+        # Puts a whole Lovelace dashboard on a Cast device (#536, found by Security). The receiver
+        # signs in as the Cast system user, which `cast/home_assistant_cast.py` creates in the admin
+        # group, so the television renders whatever the view holds, camera cards and lock tiles
+        # included. Nothing in the call names a camera for the reference walk to catch.
+        "cast.show_lovelace_view",
+        # #536, option A (the owner's ruling): a model may not start, browse or search media. Each
+        # takes a free-text media id, and `media-source://camera/<id>` resolves through the camera's
+        # own media source and comes back signed, so a television shows the camera
+        # (`test_media_camera.py`). `_CAMERA_MEDIA_RE` stays as a backstop on every other field; a
+        # template assembles an id after every check has run. A typed tool may come later.
+        "media_player.play_media",
+        "media_player.browse_media",
+        "media_player.search_media",
+        "media_extractor.play_media",
+        "music_assistant.play_media",
+        "music_assistant.play_announcement",
+        # Services that send media or an attachment off the box, or onto a screen; a template
+        # assembles `media-source://camera/<id>` after every check has run. `ai_task`'s two services
+        # and `openai_conversation.generate_content` hand a frame to the LLM provider.
+        # `mastodon.update_profile`, `ntfy.publish` and `smtp.send_message` special-case a camera or
+        # image media id, call `camera.async_get_image` with no exposure check and send the still out.
+        # `opendisplay.upload_image` draws any media id on an e-ink display, and
+        # `media_extractor.extract_media_url` fetches any URL. Mirror of the list in policy.ts.
+        "ai_task.generate_data",
+        "ai_task.generate_image",
+        "openai_conversation.generate_content",
+        "mastodon.update_profile",
+        "ntfy.publish",
+        "smtp.send_message",
+        "opendisplay.upload_image",
+        "media_extractor.extract_media_url",
         # #581 option A: services that address a device by Z-Wave node, Zigbee IEEE address, MQTT
         # topic or raw 433 MHz frame, so they never name the `lock.*` entity HA exposes for the same
         # device and the domain lists cannot see them. Each can unlock a door. `zwave_js.set_value`
@@ -323,11 +355,17 @@ def _positions_of(node: dict[str, Any]) -> list[Any] | None:
 ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
 
 
+TARGET_KEYS: frozenset[str] = frozenset({"entity_id", "device_id", "area_id", "floor_id", "label_id", "target"})
+"""Keys that would widen a call past the entity_ids it names; `devices.call` strips them from `data`.
+Mirror of TARGET_KEYS in policy.ts."""
+
+
 def find_service_call_violations(domain: str, service: str, entity_ids: list[str], data: Any = None) -> list[str]:
     """Mirror of findServiceCallViolations in packages/shared/src/policy.ts.
 
-    `data` is read only for a valve's position (#527). Leaving it out refuses `set_valve_position`,
-    so a caller that does not pass it fails closed rather than open.
+    `data` is read for a valve's position (#527), so leaving it out refuses `set_valve_position`, and
+    walked whole by `find_reference_violations` (#536), because `media_player.play_media` puts whatever
+    its `media_content_id` names on a television, a camera included.
     """
     import re  # noqa: PLC0415
 
@@ -368,6 +406,13 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
         # `homeassistant.toggle` forwards to `valve.toggle`; no other domain's service may move a valve.
         elif d == VALVE_DOMAIN and domain != VALVE_DOMAIN:
             problems.append(f"{eid}: a valve is moved only by its own services; {_VALVE_CLOSING_RULE}")
+    # Every key and value that is sent, nested ones included: `play_media` also takes `media:
+    # {media_content_id}`. A target key is left out because both sides strip it rather than refuse it.
+    # Service data is a mapping or nothing; anything else is refused rather than walked as a string.
+    if data is not None and not isinstance(data, dict):
+        problems.append(f"{full}: data must be an object")
+    elif data:
+        problems.extend(find_reference_violations({k: v for k, v in data.items() if k not in TARGET_KEYS}, f"{full}: data"))
     return list(dict.fromkeys(problems))
 
 
@@ -568,6 +613,37 @@ _REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_/\-])(" + "|".join(sorted(REFERENCEABLE_DENIED_DOMAINS | HOST_SERVICE_DOMAINS)) + r")\.[a-z0-9_]+",
     re.IGNORECASE,
 )
+CAMERA_MEDIA_SOURCES: tuple[str, ...] = ("camera", "image", "motioneye", "nest", "netatmo", "reolink", "unifiprotect")
+"""Media-source platforms that serve a camera's picture or an `image` entity (#536). Mirror of policy.ts.
+
+On the pinned 2026.9.3 a player resolves `media-source://camera/<entity_id>` through the camera's own
+media source, which looks the entity up whether or not it is shared with Assist, and Home Assistant
+then signs the URL, so a television fetches the camera with no credentials (`test_media_camera.py`).
+"""
+
+# A camera or image feed named as media, read after percent-decoding (#536): a media-source id on a
+# platform above, Home Assistant's proxy views, and the vendor views that serve recordings by id.
+# Mirror of CAMERA_MEDIA_RE in policy.ts, whose comment says why `_REFERENCE_RE` misses these (an id
+# inside a path is skipped on purpose) and why this is a backstop and not a boundary.
+_CAMERA_MEDIA_RE = re.compile(
+    r"media-source://(?:" + "|".join(CAMERA_MEDIA_SOURCES) + r")(?![a-z0-9_])"
+    r"|(?<![a-z0-9_])(?:camera|image)_proxy"
+    r"|(?<![a-z0-9_])api/+(?:nest|unifiprotect)/",
+    re.IGNORECASE,
+)
+
+
+def _percent_decoded(text: str) -> str:
+    """`%XX` runs decoded as UTF-8 until nothing changes. Mirror of percentDecoded in policy.ts."""
+    out = text
+    for _ in range(8):
+        nxt = unquote(out)
+        if nxt == out:
+            break
+        out = nxt
+    return out
+
+
 # Home Assistant's `is_template_string`: `{{`, `{%` **or `{#`**. A Jinja comment renders to nothing,
 # so `lo{# #}ck.unlock` is a template that renders to `lock.unlock` and names no denied domain raw.
 _TEMPLATE_RE = re.compile(r"\{\{|\{%|\{#")
@@ -600,6 +676,9 @@ def find_reference_violations(value: Any, path: str = "input") -> list[str]:
     def scan(text: str, p: str) -> None:
         for m in _REFERENCE_RE.finditer(text):
             problems.append(f"{p}: {m.group(0)} is in a domain Hearth never lets a model reach")
+        for t in dict.fromkeys((text, _percent_decoded(text))):
+            for m in _CAMERA_MEDIA_RE.finditer(t):
+                problems.append(f"{p}: {m.group(0)} is a camera or image feed Hearth never lets a model reach")
 
     def visit(node: Any, p: str) -> None:
         if isinstance(node, str):

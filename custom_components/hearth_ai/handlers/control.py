@@ -15,7 +15,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
 from ..labels import is_hearth_scene
-from ..policy import VALVE_DOMAIN, find_service_call_violations
+from ..policy import TARGET_KEYS, VALVE_DOMAIN, find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
@@ -37,8 +37,6 @@ MAX_DATA_KEYS = 32
 # the whole window; that is the price of never reporting a state the device has not reached, and it
 # is bounded well under the round trip the caller already paid for.
 SETTLE_TIMEOUT_S = 1.0
-# Keys that would widen a call beyond the entity_ids we validated.
-TARGET_KEYS = frozenset({"entity_id", "device_id", "area_id", "floor_id", "label_id", "target"})
 
 
 def _clean_data(data: Any) -> dict[str, Any]:
