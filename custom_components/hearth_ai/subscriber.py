@@ -26,7 +26,7 @@ from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from .handlers.registry import _entity_area, entity_dto, visible
+from .handlers.registry import _entity_area, _gates, entity_dto, visible
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,12 +77,15 @@ class StateSubscriber:
             return
         entity_id = event.data["entity_id"]
         ent = er.async_get(self._hass).async_get(entity_id)
-        if not visible(self._hass, entity_id, ent):
+        # One gate map for both questions about this change: whether it is pushed, and which of its
+        # `entity_id` attribute's members are dropped (#722).
+        gates = _gates(self._hass)
+        if not visible(self._hass, entity_id, ent, gates):
             return
         dev_reg = dr.async_get(self._hass)
         area = _entity_area(ent, dev_reg)
         # Keyed by entity, so a burst on one entity collapses to its latest value.
-        self._pending[entity_id] = entity_dto(self._hass, state, ent, area, dev_reg)
+        self._pending[entity_id] = entity_dto(self._hass, state, ent, area, dev_reg, gates)
         if self._flush is None:
             self._flush = self._hass.loop.call_later(DEBOUNCE_S, self._drain)
 

@@ -76,12 +76,24 @@ def _exposed(hass: HomeAssistant, entity_id: str) -> bool:
         return False
 
 
-def filter_attributes(attrs: dict[str, Any]) -> dict[str, Any]:
+def filter_attributes(hass: HomeAssistant, attrs: dict[str, Any], gates: GateMap | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in attrs.items():
         if k in ATTRIBUTE_DENYLIST or k.endswith("_token") or k.endswith("_url"):
             continue
         v = plain(v)
+        if k == "entity_id":
+            # A group's members, or what a scene sets (#722): `group.doors` lists `lock.front`, and
+            # the lock would reach the inventory through its group. Off-limits ids are dropped and
+            # the rest kept, so a group of lights still says which lights.
+            gates = _gates(hass) if gates is None else gates
+            if isinstance(v, str):
+                if _off_limits_id(hass, v, gates):
+                    continue
+            elif isinstance(v, list):
+                v = [e for e in v if isinstance(e, str) and not _off_limits_id(hass, e, gates)]
+            else:
+                continue
         if isinstance(v, str) and len(v) > MAX_ATTR_STR:
             v = v[:MAX_ATTR_STR] + "…"
         out[k] = v
@@ -106,7 +118,9 @@ def _device_name(ent: Any, dev_reg: dr.DeviceRegistry | None) -> str | None:
     return name[:MAX_ATTR_STR]
 
 
-def entity_dto(hass: HomeAssistant, state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegistry | None) -> dict[str, Any]:
+def entity_dto(
+    hass: HomeAssistant, state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegistry | None, gates: GateMap | None = None
+) -> dict[str, Any]:
     """One entity in the shape `Entity` describes, so a pushed change and a polled one agree.
 
     Takes the device registry rather than a precomputed name so that both callers — the list
@@ -128,7 +142,7 @@ def entity_dto(hass: HomeAssistant, state: Any, ent: Any, area_id: str | None, d
         # (AgDR-0034), so a rule change never needs a release of this integration.
         "hearth_labels": hearth_labels(hass, ent, dev_reg),
         "state": state.state,
-        "attributes": filter_attributes(dict(state.attributes)),
+        "attributes": filter_attributes(hass, dict(state.attributes), gates),
     }
 
 
@@ -407,6 +421,11 @@ def off_limits(hass: HomeAssistant, entity_id: str, gates: GateMap | None = None
     return effective_domain(hass, entity_id, gates) in OFF_LIMITS
 
 
+def _off_limits_id(hass: HomeAssistant, entity_id: str, gates: GateMap | None = None) -> bool:
+    """`off_limits`, plus the literal domain, as `visible` checks both (#722)."""
+    return entity_id.split(".", 1)[0].lower() in OFF_LIMITS or off_limits(hass, entity_id, gates)
+
+
 def visible(hass: HomeAssistant, entity_id: str, ent: Any, gates: GateMap | None = None) -> bool:
     """Whether the model may see this entity: the one rule the readers named below apply (#259).
 
@@ -511,7 +530,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         name = state.name
         if query and query not in state.entity_id.lower() and query not in (name or "").lower():
             continue
-        out.append(entity_dto(hass, state, ent, entity_area, dev_reg))
+        out.append(entity_dto(hass, state, ent, entity_area, dev_reg, gates))
         if len(out) >= limit:
             break
     return out
@@ -531,7 +550,7 @@ async def states_get(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, A
     return {
         "entity_id": state.entity_id,
         "state": state.state,
-        "attributes": filter_attributes(dict(state.attributes)),
+        "attributes": filter_attributes(hass, dict(state.attributes)),
         "last_changed": state.last_changed.isoformat(),
     }
 

@@ -25,6 +25,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, MockMo
 
 from custom_components.hearth_ai.handlers.flows import check_flow_input
 from custom_components.hearth_ai.handlers.resolve import resolve_registry_ids
+from custom_components.hearth_ai.handlers.scenes import UNREACHABLE_SCENE
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 # A device id is 32 hex too, and lives in another registry. Nothing here may touch it.
@@ -245,7 +246,8 @@ async def test_an_activated_scene_is_resolved_too(core: HomeAssistant) -> None:
     d = build_dispatcher(core)
     res = await d.dispatch("automations.validate", {"config": _automation({"action": "scene.turn_on", "target": {"entity_id": gate}})})
     assert res["ok"] is False and res["status"] == "policy"
-    assert "lock.gate" in res["error"]
+    # The scene's lock is refused without being named (#722).
+    assert UNREACHABLE_SCENE in res["error"] and "lock.gate" not in res["error"]
     res = await d.dispatch("automations.validate", {"config": _automation({"action": "scene.turn_on", "target": {"entity_id": film}})})
     assert res == {"ok": True, "status": "ok"}
 

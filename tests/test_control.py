@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_mock_service
 
-from custom_components.hearth_ai.handlers import control, registry
+from custom_components.hearth_ai.handlers import control, registry, scenes
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 TEST = "input_boolean.test"
@@ -280,7 +280,9 @@ async def test_refuses_to_activate_a_scene_that_sets_a_denied_entity(core: HomeA
     with pytest.raises(RpcError) as ei:
         await d.dispatch("scenes.activate", {"entity_id": "scene.open_the_gate"})
     assert ei.value.code == "method_not_allowed"
-    assert "lock.gate" in ei.value.message
+    # Refused without naming the lock (#722): for a scene with no scenes.yaml entry this attribute is
+    # the only place its id appears, and every reader answers for it as for an unknown id.
+    assert ei.value.message == scenes.UNREACHABLE_SCENE
 
 
 async def test_scene_and_script_lists_report_whether_they_can_be_run(core: HomeAssistant) -> None:
@@ -402,7 +404,8 @@ async def test_a_script_hearth_presents_as_a_scene_is_checked_when_it_runs(core:
     with pytest.raises(RpcError) as ei:
         await d.dispatch("scripts.run", {"entity_id": "script.let_me_in"})
     assert ei.value.code == "method_not_allowed"
-    assert "lock.gate" in ei.value.message
+    # The nested scene's lock is refused without being named (#722).
+    assert scenes.UNREACHABLE_SCENE in ei.value.message and "lock.gate" not in ei.value.message
 
     # A labelled script of ordinary actions still runs.
     scripts_yaml.write_text("film_time:\n  alias: Film time\n  sequence:\n  - action: input_boolean.turn_on\n    target:\n      entity_id: input_boolean.test\n")

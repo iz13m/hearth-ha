@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from custom_components.hearth_ai.handlers import registry
+from custom_components.hearth_ai.handlers.scenes import UNREACHABLE_SCENE
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 AUTOMATION = {
@@ -336,7 +337,8 @@ async def test_refuses_a_script_that_turns_on_a_scene_setting_a_lock(core: HomeA
     nested = {"alias": "Let me in", "sequence": [{"action": "scene.turn_on", "target": {"entity_id": "scene.open_the_gate"}}]}
     res = await d.dispatch("scripts.validate", {"key": "let_me_in", "config": nested})
     assert res["ok"] is False and res["status"] == "policy"
-    assert "lock.gate" in res["error"]
+    # The scene's lock is refused without being named (#722).
+    assert UNREACHABLE_SCENE in res["error"] and "lock.gate" not in res["error"]
     with pytest.raises(RpcError) as ei:
         await d.dispatch("scripts.create", {"key": "let_me_in", "config": nested})
     assert ei.value.code == "validation_failed"
@@ -547,7 +549,8 @@ async def test_refuses_the_scene_shorthand_that_activates_a_scene_setting_a_lock
     shorthand = {"alias": "Let me in", "sequence": [{"scene": "scene.open_the_gate"}]}
     res = await d.dispatch("scripts.validate", {"key": "let_me_in", "config": shorthand})
     assert res["ok"] is False and res["status"] == "policy"
-    assert "lock.gate" in res["error"]
+    # The scene's lock is refused without being named (#722).
+    assert UNREACHABLE_SCENE in res["error"] and "lock.gate" not in res["error"]
     with pytest.raises(RpcError):
         await d.dispatch("scripts.create", {"key": "let_me_in", "config": shorthand})
 

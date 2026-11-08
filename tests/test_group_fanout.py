@@ -21,6 +21,7 @@ from pytest_homeassistant_custom_component.common import async_mock_service
 
 from custom_components.hearth_ai import labels as hl
 from custom_components.hearth_ai.handlers import registry
+from custom_components.hearth_ai.handlers.scenes import UNREACHABLE_SCENE
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 
@@ -76,7 +77,8 @@ async def test_the_measured_case_a_group_holding_a_scene_that_sets_a_lock_is_ref
     assert ei.value.code == "method_not_allowed"
 
     message = await _refused(core, "group.evening")
-    assert "scene.open_gate" in message and "lock.gate" in message
+    # The scene is named; the lock it sets is not (#722).
+    assert "scene.open_gate" in message and UNREACHABLE_SCENE in message and "lock.gate" not in message
     # Every service that could carry it there, not only `turn_on`.
     for service in ("turn_off", "toggle"):
         await _refused(core, "group.evening", service)
@@ -157,7 +159,8 @@ async def test_script_member_measured_runs_and_is_held_to_the_scripts_run_rules(
 
     # Labelled as a Hearth scene: its contents are checked, and the lock stops it.
     await hl.async_mark_hearth_scene(core, "script.let_me_in", True)
-    assert "lock.gate" in await _refused(core, "group.door")
+    message = await _refused(core, "group.door")
+    assert UNREACHABLE_SCENE in message and "lock.gate" not in message  # unnamed (#722)
     assert not scripts
 
 

@@ -79,6 +79,10 @@ def _members(hass: HomeAssistant, entity_id: str) -> list[str]:
     return [e for e in raw if isinstance(e, str)] if isinstance(raw, list) else []
 
 
+# Why a scene that sets an off-limits entity may not run, without naming it (#648, #722).
+UNREACHABLE_SCENE = "this scene sets something Hearth does not operate, so it cannot be activated"
+
+
 def gated_refusals(gates: GateMap, entity_ids: Iterable[str]) -> list[str]:
     """Why a scene that sets these may not run, for each one a `switch_as_x` gate covers (#643).
 
@@ -97,7 +101,7 @@ def gated_refusals(gates: GateMap, entity_ids: Iterable[str]) -> list[str]:
         if gate is None or gate == eid.split(".", 1)[0].lower():
             continue
         if gate in OFF_LIMITS:
-            problems.append("this scene sets something Hearth does not operate, so it cannot be activated")
+            problems.append(UNREACHABLE_SCENE)
         else:
             problems.append(f"{eid}: this drives a {gate}, so a scene that sets it cannot be activated")
     return list(dict.fromkeys(problems))
@@ -113,11 +117,10 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
     is authoritative but only exists for scenes in scenes.yaml, and the attribute covers the rest.
     """
     members = _members(hass, entity_id)
-    problems = [
-        f"{eid}: scenes that set {eid.split('.', 1)[0]} entities cannot be activated"
-        for eid in members
-        if eid.split(".", 1)[0] in DENIED_ENTITY_DOMAINS
-    ]
+    # Unnamed, as `gated_refusals` words a relay under a lock (#722): for a scene with no scenes.yaml
+    # entry this attribute is the only place the id appears, and every reader answers for it as for
+    # an unknown id, so the refusal must not be the one place that says it exists.
+    problems = [UNREACHABLE_SCENE for eid in members if eid.split(".", 1)[0] in DENIED_ENTITY_DOMAINS]
     # A group's `reproduce_state` sets every member: `group.doors: unlocked` unlocks each lock in it.
     # The attribute covers a scene with no scenes.yaml entry; the config's keys are checked below.
     problems += [f"{eid}: a scene that sets a group cannot be activated; what its members are cannot be checked here" for eid in members if eid.split(".", 1)[0].lower() == "group"]

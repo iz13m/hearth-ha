@@ -26,6 +26,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
 
+from custom_components.hearth_ai.handlers.scenes import UNREACHABLE_SCENE
 from custom_components.hearth_ai.rpc import RpcError, build_dispatcher
 
 LOCK = "lock.gate"
@@ -152,7 +153,9 @@ async def test_a_template_helper_activating_a_scene_that_unlocks_is_not_made(cor
     gate_uuid = er.async_get(core).async_get("scene.gate").id
     for target in ("scene.gate", gate_uuid):
         got = await _hearth(core, path, variant, _form(variant, _scene(target)))
-        assert got is not None and got[0] == "validation_failed" and "scenes that set lock entities cannot be activated" in got[1], (target, got)
+        # The attribute check no longer names the lock (#722). This scene is in scenes.yaml, so the
+        # config check still does: `scenes.get` returns that config as written.
+        assert got is not None and got[0] == "validation_failed" and UNREACHABLE_SCENE in got[1], (target, got)
         assert _made(core, variant) == [] and core.config_entries.flow.async_progress() == [], target
     assert await _hearth(core, path, variant, _form(variant, _scene("scene.porch"))) is None
     assert len(_made(core, variant)) == 1
@@ -200,7 +203,7 @@ async def test_helpers_update_is_checked_like_a_create(core: HomeAssistant, tmp_
     made = await d.dispatch("helpers.create", {"domain": "input_boolean", "config": {"name": "Guests coming"}})
     for config, words in (
         ({"icon": "mdi:door", "entity_id": "lock.front_door"}, "lock.front_door"),
-        ({"icon": "mdi:door", "turn_on": [_scene("scene.gate")]}, "scenes that set lock entities cannot be activated"),
+        ({"icon": "mdi:door", "turn_on": [_scene("scene.gate")]}, UNREACHABLE_SCENE),
     ):
         with pytest.raises(RpcError) as ei:
             await d.dispatch("helpers.update", {"id": made["id"], "config": config})
