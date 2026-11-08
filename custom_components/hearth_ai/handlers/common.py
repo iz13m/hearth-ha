@@ -63,6 +63,9 @@ def plain(value: Any) -> Any:
         return {str(k): plain(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [plain(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        # A list, so what is in it is walked and filtered, rather than one string of its repr (#729).
+        return [plain(v) for v in sorted(value, key=str)]
     if isinstance(value, str):
         return str(value)
     if isinstance(value, bool) or value is None or isinstance(value, (int, float)):

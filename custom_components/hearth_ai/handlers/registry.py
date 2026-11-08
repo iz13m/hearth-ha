@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -33,6 +34,8 @@ ATTRIBUTE_DENYLIST: frozenset[str] = frozenset(
         "url",
         "video_url",
         "image_url",
+        # `zone.*` lists the `person.*` ids in it: who is home is location data (#729).
+        "persons",
     }
 )
 # Domains whose state/attributes are never exposed, even read-only. `image_processing` is here because
@@ -76,24 +79,87 @@ def _exposed(hass: HomeAssistant, entity_id: str) -> bool:
         return False
 
 
+# Every run shaped like an entity id inside a string, `domain.object_id`, Unicode-aware because
+# Home Assistant's own `valid_entity_id` uses `\d` and so accepts `lock.front٣` or `lock.１` (#729).
+# A run starts only where no word character precedes it, so `block.x` is not read as `lock.x`, and
+# runs overlap (the lookahead), so `a.lock.front` yields `lock.front` as well as `a.lock`.
+_ID_RUN = re.compile(r"(?<!\w)(?=(\w+\.\w+))")
+# What `clean` returns for something its container leaves out.
+_DROP = object()
+
+
 def filter_attributes(hass: HomeAssistant, attrs: dict[str, Any], gates: GateMap | None = None) -> dict[str, Any]:
+    """An entity's attributes as a reader may see them.
+
+    Keys in `ATTRIBUTE_DENYLIST` (or ending `_token` / `_url`) go. Then every string at any depth (an
+    attribute's own key, a list item, a dict key or value) that names an off-limits entity is dropped,
+    the rest kept (#722, #729): a group's or a scene's `entity_id`, but also a `bayesian` sensor's
+    `occurred_observation_entities` and `observations`, which usually name a `person.*` or a
+    `device_tracker.*`, a `utility_meter`'s or a `compensation`'s `source`, `min_max`'s
+    `min_entity_id`, `universal`'s `active_child`, a `media_player`'s `group_members`. Allowed ids
+    stay, so a group of lights still says which lights. A dict with a value that was dropped goes
+    whole, since it describes that entity (a Bayesian observation of `person.me`); a dict key that
+    was dropped takes only its own entry. `zone.*`'s `persons` is in the denylist, since who is in a
+    zone is location data whatever their ids.
+
+    "Names" fails closed: every id-shaped run anywhere in a string is checked, and one under an
+    off-limits domain, literal or effective (#643), drops the whole string. So "lock.front ",
+    "light.a,lock.front", "[lock.front]", "x:lock.front", a template's `states('lock.front')`, the
+    `str()` of a mapping proxy or a deque that `plain` falls back to, and "the lock.gate is shut"
+    all go. The cost is that text which merely starts a word with an off-limits domain and a dot
+    (a file called `image.png`) goes too.
+    """
+    cache: dict[str, bool] = {}
+    box: list[GateMap | None] = [gates]
+
+    def run_hidden(run: str) -> bool:
+        if run.partition(".")[0].lower() in OFF_LIMITS:
+            return True
+        # The gate map is built only once an id-shaped run turns up.
+        if box[0] is None:
+            box[0] = _gates(hass)
+        return off_limits(hass, run.lower(), box[0])
+
+    def hidden(s: str) -> bool:
+        # Cheap first: a string with no dot is never an id. Each distinct string is answered once.
+        if "." not in s:
+            return False
+        if s not in cache:
+            cache[s] = any(run_hidden(m.group(1)) for m in _ID_RUN.finditer(s))
+        return cache[s]
+
+    def clean(v: Any) -> Any:
+        if isinstance(v, str):
+            return _DROP if hidden(v) else v
+        if isinstance(v, list):
+            return [c for c in (clean(e) for e in v) if c is not _DROP]
+        if isinstance(v, dict):
+            out: dict[str, Any] = {}
+            for k, e in v.items():
+                if hidden(k):
+                    continue
+                c = clean(e)
+                if c is _DROP:
+                    return _DROP
+                out[k] = c
+            return out
+        return v
+
     out: dict[str, Any] = {}
     for k, v in attrs.items():
-        if k in ATTRIBUTE_DENYLIST or k.endswith("_token") or k.endswith("_url"):
+        if k in ATTRIBUTE_DENYLIST or k.endswith("_token") or k.endswith("_url") or hidden(k):
             continue
         v = plain(v)
         if k == "entity_id":
-            # A group's members, or what a scene sets (#722): `group.doors` lists `lock.front`, and
-            # the lock would reach the inventory through its group. Off-limits ids are dropped and
-            # the rest kept, so a group of lights still says which lights.
-            gates = _gates(hass) if gates is None else gates
-            if isinstance(v, str):
-                if _off_limits_id(hass, v, gates):
-                    continue
-            elif isinstance(v, list):
-                v = [e for e in v if isinstance(e, str) and not _off_limits_id(hass, e, gates)]
-            else:
+            # A group's members, or what a scene sets (#722): ids only, in the shapes Home Assistant
+            # writes.
+            if isinstance(v, list):
+                v = [e for e in v if isinstance(e, str)]
+            elif not isinstance(v, str):
                 continue
+        v = clean(v)
+        if v is _DROP:
+            continue
         if isinstance(v, str) and len(v) > MAX_ATTR_STR:
             v = v[:MAX_ATTR_STR] + "…"
         out[k] = v
