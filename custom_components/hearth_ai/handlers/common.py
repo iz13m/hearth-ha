@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util.file import write_utf8_file_atomic
 from homeassistant.util.yaml import dump, load_yaml
 
+from ..labels import is_hearth_scene
 from ..rpc import RpcError
 
 # One lock per config file; HA's own config views use a per-view lock the same way.
@@ -67,3 +68,28 @@ def plain(value: Any) -> Any:
     if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
         return value
     return str(value)
+
+
+def check_hearth_scene_kept(hass: HomeAssistant, entity_id: str | None, hearth_scene: bool | None) -> None:
+    """Refuse a save that would take `Hearth: scene` off a routine (#628, #617).
+
+    The label is what turns on the run-time re-check of a scene stored as a script (AgDR-0044), and a
+    label may only ever narrow (AgDR-0034), so a save may put it on but never take it off. Nothing
+    Hearth sends clears it: the app only ever sends `true`, since a scene becomes a script one way
+    and is deleted rather than turned back. The hub refuses the flag from a model on every surface
+    but the app; this is the box's half, which cannot tell the app from a model and so refuses the
+    removal from everyone. A person takes the label off in Home Assistant.
+
+    Called before anything is written, so a refusal leaves the routine as it was. `false` on a
+    routine that does not carry the label changes nothing and is let through.
+
+    Stated limit (Security's ruling on #628): a model that can write scripts can still delete a
+    Hearth scene and write an unlabelled script in its place. That path is loud and its config
+    passes the same authoring-time scans; the label is not a boundary against such a model.
+    """
+    if hearth_scene is False and entity_id and is_hearth_scene(hass, entity_id):
+        raise RpcError(
+            "method_not_allowed",
+            f"{entity_id} is a Hearth scene and keeps its 'Hearth: scene' label; "
+            "it is taken off in Home Assistant by a person, never from here",
+        )

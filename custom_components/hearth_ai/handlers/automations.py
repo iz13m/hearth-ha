@@ -18,7 +18,7 @@ from homeassistant.helpers import entity_registry as er
 from ..labels import async_mark_hearth_scene, is_hearth_scene
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import Dispatcher, RpcError
-from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
+from .common import check_hearth_scene_kept, lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .scenes import find_config_violations, find_nested_scene_violations
 
 ORDERED_KEYS = ("alias", "description", "triggers", "trigger", "conditions", "condition", "actions", "action")
@@ -127,6 +127,7 @@ async def _save(
     hass: HomeAssistant, key: str, config: dict[str, Any], *, must_exist: bool, hearth_scene: bool | None = None
 ) -> dict[str, Any]:
     config.pop(CONF_ID, None)
+    check_hearth_scene_kept(hass, _entity_id(hass, key), hearth_scene)
     result = await _validate(hass, key, config)
     if not result["ok"]:
         raise RpcError("validation_failed", result.get("error") or "invalid automation", {"status": result.get("status")})

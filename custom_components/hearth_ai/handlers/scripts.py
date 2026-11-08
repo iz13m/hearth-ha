@@ -30,7 +30,7 @@ from ..policy import (
     find_reference_violations,
 )
 from ..rpc import Dispatcher, RpcError
-from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
+from .common import check_hearth_scene_kept, lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .registry import GateMap, _exposed, _gates
 from .resolve import resolve_registry_ids
 from .gated import find_gate_violations
@@ -310,6 +310,9 @@ async def _save(
     it, releasing the lock and writing later let two creates with the same name pick the same key,
     and the second overwrote the first (#173).
     """
+    # A key chosen from `new_from` is a free one, so nothing there carries the label yet.
+    if new_from is None:
+        check_hearth_scene_kept(hass, _entity_id(hass, key), hearth_scene)
     result = await _validate(hass, key, config)
     if not result["ok"]:
         raise RpcError("validation_failed", result.get("error") or "invalid script", {"status": result.get("status")})

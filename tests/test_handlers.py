@@ -414,17 +414,90 @@ async def test_labels_a_routine_as_a_hearth_scene_and_reports_it(core: HomeAssis
     await core.async_block_till_done()
     assert hl.is_hearth_scene(core, entity_id) is True
 
-    # And false takes it off, which is how a scene stops being one.
-    await d.dispatch("scripts.update", {"id": "evening", "config": config, "hearth_scene": False})
-    await core.async_block_till_done()
-    assert hl.is_hearth_scene(core, entity_id) is False
-
     # An automation carries it too: that is a scene's schedule.
     auto = await d.dispatch("automations.create", {"config": AUTOMATION, "hearth_scene": True})
     await core.async_block_till_done()
     assert hl.is_hearth_scene(core, auto["entity_id"])
     rows = await d.dispatch("automations.list", {})
     assert next(a for a in rows if a["entity_id"] == auto["entity_id"])["hearth_scene"] is True
+
+
+async def test_a_save_never_takes_hearth_scene_off(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    `Hearth: scene` turns on the run-time re-check of a scene stored as a script (AgDR-0044), and a
+    label may only narrow (AgDR-0034). So `hearth_scene: false` is refused on a routine that carries
+    it, from anyone: the box cannot tell the app from a model, and the app never sends false (#628).
+    The refusal comes before the write, so the routine is left exactly as it was.
+    """
+    from custom_components.hearth_ai import labels as hl
+
+    await hl.async_ensure_labels(core)
+    d = build_dispatcher(core)
+    config = {"alias": "Evening", "sequence": [{"action": "input_boolean.turn_on", "target": {"entity_id": "input_boolean.test"}}]}
+    changed = {**config, "alias": "Evening changed"}
+    entity_id = (await d.dispatch("scripts.create", {"id": "evening", "config": config, "hearth_scene": True}))["entity_id"]
+    await core.async_block_till_done()
+    assert hl.is_hearth_scene(core, entity_id)
+
+    for method, params in (
+        ("scripts.update", {"id": "evening", "config": changed, "hearth_scene": False}),
+        # A create that names the same key overwrites it, so it is the same removal.
+        ("scripts.create", {"id": "evening", "config": changed, "hearth_scene": False}),
+    ):
+        with pytest.raises(RpcError) as ei:
+            await d.dispatch(method, params)
+        assert ei.value.code == "method_not_allowed", method
+        await core.async_block_till_done()
+        assert hl.is_hearth_scene(core, entity_id) is True, method
+        assert (await d.dispatch("scripts.get", {"id": "evening"}))["config"]["alias"] == "Evening", method
+
+    # The same for a scene's schedule.
+    auto = await d.dispatch("automations.create", {"config": AUTOMATION, "hearth_scene": True})
+    await core.async_block_till_done()
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("automations.update", {"id": auto["id"], "config": {**AUTOMATION, "alias": "Moved"}, "hearth_scene": False})
+    assert ei.value.code == "method_not_allowed"
+    await core.async_block_till_done()
+    assert hl.is_hearth_scene(core, auto["entity_id"]) is True
+    assert (await d.dispatch("automations.get", {"id": auto["id"]}))["config"]["alias"] == AUTOMATION["alias"]
+
+    # The app's everyday call: re-saving a labelled routine with true goes through and keeps the label.
+    await d.dispatch("scripts.update", {"id": "evening", "config": changed, "hearth_scene": True})
+    await core.async_block_till_done()
+    assert (await d.dispatch("scripts.get", {"id": "evening"}))["config"]["alias"] == "Evening changed"
+    assert hl.is_hearth_scene(core, entity_id) is True
+    await d.dispatch("automations.update", {"id": auto["id"], "config": {**AUTOMATION, "alias": "Moved"}, "hearth_scene": True})
+    await core.async_block_till_done()
+    assert (await d.dispatch("automations.get", {"id": auto["id"]}))["config"]["alias"] == "Moved"
+    assert hl.is_hearth_scene(core, auto["entity_id"]) is True
+    # And with the flag absent: leave the label alone.
+    await d.dispatch("scripts.update", {"id": "evening", "config": config})
+    await core.async_block_till_done()
+    assert (await d.dispatch("scripts.get", {"id": "evening"}))["config"]["alias"] == "Evening"
+    assert hl.is_hearth_scene(core, entity_id) is True
+
+    # A create with no id picks a free key from the alias, which carries no label yet, so false is
+    # let through there even while `script.evening` is a Hearth scene; that one is untouched.
+    fresh = await d.dispatch("scripts.create", {"config": config, "hearth_scene": False})
+    await core.async_block_till_done()
+    assert fresh["id"] != "evening"
+    assert hl.is_hearth_scene(core, fresh["entity_id"]) is False
+    assert hl.is_hearth_scene(core, entity_id) is True
+    assert (await d.dispatch("scripts.get", {"id": "evening"}))["config"]["alias"] == "Evening"
+
+    # Control: on a routine without the label, false changes nothing and the save goes through.
+    plain = {"alias": "Plain", "sequence": config["sequence"]}
+    made = (await d.dispatch("scripts.create", {"id": "plain", "config": plain}))["entity_id"]
+    await core.async_block_till_done()
+    await d.dispatch("scripts.update", {"id": "plain", "config": {**plain, "alias": "Plain 2"}, "hearth_scene": False})
+    assert (await d.dispatch("scripts.get", {"id": "plain"}))["config"]["alias"] == "Plain 2"
+    assert hl.is_hearth_scene(core, made) is False
+    other = await d.dispatch("automations.create", {"config": AUTOMATION, "hearth_scene": False})
+    await core.async_block_till_done()
+    assert hl.is_hearth_scene(core, other["entity_id"]) is False
+    # And true still puts it on: adding narrows.
+    await d.dispatch("scripts.update", {"id": "plain", "config": plain, "hearth_scene": True})
+    assert hl.is_hearth_scene(core, made) is True
 
 
 async def test_switches_an_automation_on_and_off_without_ever_running_it(core: HomeAssistant, tmp_path: Path) -> None:

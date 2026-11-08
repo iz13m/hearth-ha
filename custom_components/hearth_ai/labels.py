@@ -177,7 +177,13 @@ def is_hearth_scene(hass: HomeAssistant, entity_id: str) -> bool:
 
 
 async def async_mark_hearth_scene(hass: HomeAssistant, entity_id: str, wanted: bool) -> None:
-    """Put `Hearth: scene` on a routine, or take it off. Silent when the label does not exist yet."""
+    """Put `Hearth: scene` on a routine, or take it off. Silent when the label does not exist yet.
+
+    A save never takes it off: `scripts.*`/`automations.*` call this only after
+    `check_hearth_scene_kept` has refused `false` on a routine that carries the label (#628), so
+    from a save `wanted=False` only ever meets a routine without it. Taking it off is a person's
+    act in Home Assistant; the `False` branch remains for that state to be set up in tests.
+    """
     label_id = label_id_for(hass, "scene")
     reg = er.async_get(hass)
     entry = reg.async_get(entity_id) if label_id else None
