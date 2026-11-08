@@ -265,10 +265,84 @@ class GateMap:
         return gate
 
     def _members(self, entity_id: str) -> list[str]:
-        state = self._hass.states.get(entity_id)
-        members = state.attributes.get("entity_id") if state is not None else None
-        members = [members] if isinstance(members, str) else members
-        return [m.lower() for m in members if isinstance(m, str)] if isinstance(members, (list, tuple)) else []
+        return group_members(self._hass, entity_id)
+
+
+def group_members(hass: HomeAssistant, entity_id: str) -> list[str]:
+    """The ids an entity publishes as its `entity_id` attribute, lower-cased; [] when it has none.
+
+    What an old-style `group.*` and Home Assistant's own entity groups hand a service call on to
+    (`helpers/group.py`, `expand_entity_ids`), and what a scene sets. Read off the state machine, so
+    a member changed a moment ago already counts.
+    """
+    state = hass.states.get(entity_id)
+    members = state.attributes.get("entity_id") if state is not None else None
+    members = [members] if isinstance(members, str) else members
+    return [m.lower() for m in members if isinstance(m, str)] if isinstance(members, (list, tuple)) else []
+
+
+# How far `expand_members` follows groups of groups, and how many entities it will reach, before it
+# gives up. A real home's groups are a few levels deep and a few dozen wide; past either bound the
+# caller refuses rather than act on what it did not finish checking.
+EXPAND_MAX_DEPTH = 8
+EXPAND_MAX_MEMBERS = 256
+
+
+class MembershipUnwalkable(Exception):
+    """`expand_members` gave up: past a bound, or (`cycle`) two groups hold each other."""
+
+    def __init__(self, entity_id: str, *, cycle: bool = False) -> None:
+        super().__init__(entity_id)
+        self.cycle = cycle
+
+
+def expand_members(hass: HomeAssistant, entity_id: str, *, stop: frozenset[str] = frozenset()) -> list[str]:
+    """Every entity a service call on `entity_id` fans out to through group membership, in walk order.
+
+    Follows `group_members` as far as it goes, as Home Assistant's `expand_entity_ids` does when a
+    service is called on a group, and keeps the groups it passes through as well as the leaves, so a
+    caller checking each one sees every level. `entity_id` itself is not in the answer, and each
+    entity is reported once however many groups hold it.
+
+    Raises `MembershipUnwalkable` past `EXPAND_MAX_DEPTH` nested groups (counting `entity_id` itself;
+    the entities the deepest group holds are not another level) or `EXPAND_MAX_MEMBERS` entities, and
+    when a group is reached again below itself. A group holding *itself* is skipped, as Home Assistant
+    skips it; two groups holding each other send Home Assistant's own expansion round until Python's
+    recursion limit (measured on 2026.9.3), so the caller refuses instead of passing that on.
+
+    A member whose domain is in `stop` is reported but not walked into. A scene publishes the entities
+    it *sets* in the same attribute, and those are its own run check's to judge, not a fan-out.
+    """
+    start = entity_id.lower()
+    out: list[str] = []
+    reported: set[str] = set()
+    # A depth-first walk: `path` is the groups being walked (a member on it is a cycle), `done` the ones
+    # already walked whole, which are not walked again however many groups hold them.
+    done: set[str] = set()
+
+    def walk(parent: str, members: list[str], path: tuple[str, ...]) -> None:
+        for member in members:
+            if member == parent:
+                continue
+            if member in path:
+                raise MembershipUnwalkable(start, cycle=True)
+            if member not in reported:
+                reported.add(member)
+                out.append(member)
+                if len(out) > EXPAND_MAX_MEMBERS:
+                    raise MembershipUnwalkable(start)
+            if member in done or member.split(".", 1)[0] in stop:
+                continue
+            # Only a member that holds something is another level: a lamp at the bottom of the
+            # deepest allowed group is a leaf, not a level past the bound.
+            if inner := group_members(hass, member):
+                if len(path) >= EXPAND_MAX_DEPTH:
+                    raise MembershipUnwalkable(start)
+                walk(member, inner, (*path, member))
+        done.add(parent)
+
+    walk(start, group_members(hass, start), (start,))
+    return out
 
 
 def _stricter(a: str | None, b: str | None) -> str | None:

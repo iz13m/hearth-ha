@@ -15,10 +15,10 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
 from ..labels import is_hearth_scene
-from ..policy import find_service_call_violations
+from ..policy import VALVE_DOMAIN, find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
-from .registry import _exposed, _gates, effective_domain, visible
+from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
 from .scenes import scene_run_violations
 from .scripts import script_run_violations
 
@@ -93,7 +93,8 @@ async def _settled(hass: HomeAssistant, entity_ids: list[str], call: Any) -> Non
         unsub()
 
 
-async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
+async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities: frozenset[str] | None = None) -> dict[str, Any]:
+    """`capabilities` is the dispatcher's enabled set (None = everything), for `member_violations`."""
     domain = require_str(params, "domain")
     service = require_str(params, "service")
     raw_ids = params.get("entity_id")
@@ -134,6 +135,10 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
         if gate != entity_id.split(".", 1)[0].lower():
             raise RpcError("method_not_allowed", f"{entity_id}: this drives a {gate}; Hearth refuses it through any other domain's service")
 
+    for entity_id in raw_ids:
+        if problems := await member_violations(hass, domain, entity_id, gates, capabilities):
+            raise RpcError("method_not_allowed", "; ".join(problems))
+
     data = _clean_data(params.get("data"))
     try:
         async with asyncio.timeout(CALL_TIMEOUT_S):
@@ -149,6 +154,73 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str,
         "called": f"{domain}.{service}",
         "entities": [{"entity_id": e, "state": _state_of(hass, e) or "unknown"} for e in raw_ids],
     }
+
+
+async def member_violations(
+    hass: HomeAssistant, domain: str, entity_id: str, gates: GateMap, capabilities: frozenset[str] | None = None
+) -> list[str]:
+    """Why a service call on `entity_id` may not fan out to what it holds (#657). Empty means it may.
+
+    A service called on an old-style `group.*`, or on one of Home Assistant's entity groups, acts on
+    every member, recursively: `homeassistant.turn_on group.evening` calls `scene.turn_on` on a scene
+    in it, `script.turn_on` on a script (which runs it) and `automation.turn_on` on an automation
+    (which switches it on). None of that passes the checks the member would meet if it were named, so
+    each member is put through them here, and one refusal refuses the whole call before anything is
+    sent:
+
+    - **Off-limits**, by literal or effective domain: a lock, siren or alarm panel in a group is
+      refused like one named directly, without naming it (#648). `homeassistant.turn_on` reaches a
+      `siren` this way; a lock has no `turn_on`, but the rule does not depend on which service names it.
+    - **A valve** is moved only by a `valve.*` service, as when it is named (#527): `homeassistant.toggle`
+      forwards to `valve.toggle`.
+    - **A scene or a script** is refused outright unless `routines.run` is on. `devices.call` needs
+      only `devices.control`, and running a routine is the other switch's to grant; AgDR-0005's
+      licence for a script to do whatever its owner wrote is a licence for `scripts.run`, which
+      `routines.run` gates. `capabilities` is None only where everything is enabled (tests, legacy).
+    - **A scene** must be shared with Assist and pass its own run check (`scene_run_violations`,
+      AgDR-0012), exactly as `scenes.activate` asks.
+    - **A script** must be shared with Assist, and one Hearth presents as a scene must pass its run
+      check, exactly as `scripts.run` asks (AgDR-0005, AgDR-0044).
+    - **An automation** is refused: switching one on or off is `automations.set_enabled`'s alone, an
+      app-only path, and `automation.turn_on`/`turn_off`/`toggle` are refused by name (AgDR-0042).
+
+    The check is made whatever service the call names, so `light.turn_on` on a mixed group that holds
+    a scene or a valve is refused although that service would not reach them. That is deliberate:
+    it fails closed, and one rule for every service cannot be talked round by picking the service.
+
+    A scene's own `entity_id` attribute lists what it *sets*, which its run check judges, so the walk
+    does not descend into it. A `switch_as_x` gate on any member is already the group's own
+    (`GateMap` walks the same membership), so `devices_call` has refused that before this runs.
+    """
+    try:
+        members = expand_members(hass, entity_id, stop=frozenset({"scene", "script", "automation"}))
+    except MembershipUnwalkable as err:
+        if err.cycle:
+            # Home Assistant's own expansion would recurse until Python's limit on such a call.
+            return [f"{entity_id}: this group reaches groups that hold each other, so what it reaches has no end"]
+        return [f"{entity_id}: this group holds too many entities, or groups nested too deep, for Hearth to check what it reaches"]
+    problems: list[str] = []
+    for member in members:
+        literal = member.split(".", 1)[0]
+        # Both halves, as `visible()` has them: a gate replaces the effective domain, and ruling 9 hands
+        # a valve-wrapped group's gate down to its members, so a literal `lock.*` member of such a group
+        # has the effective domain `valve`, which `off_limits` alone would let through.
+        if off_limits(hass, member, gates) or literal in OFF_LIMITS:
+            problems.append(f"{entity_id}: this group holds something Hearth never lets a model reach")
+        elif literal == VALVE_DOMAIN and domain.lower() != VALVE_DOMAIN:
+            problems.append(f"{entity_id}: this group holds {member}, and a valve is moved only by its own services")
+        elif literal == "automation":
+            problems.append(f"{entity_id}: this group holds {member}, and a call on the group would switch that automation on or off")
+        elif literal in ("scene", "script") and capabilities is not None and "routines.run" not in capabilities:
+            problems.append(f"{entity_id}: this group holds {member}, and a call on the group would run it; running scenes and scripts is disabled in the Azka AI options")
+        elif literal in ("scene", "script") and hass.states.get(member) is not None:
+            if not _exposed(hass, member):
+                problems.append(f"{entity_id}: this group holds {member}, which is not shared with Assist, and a call on the group would run it")
+            elif literal == "scene" and (found := await scene_run_violations(hass, member)):
+                problems += [f"{entity_id}: this group holds {member}, which may not be activated: {v}" for v in found]
+            elif literal == "script" and is_hearth_scene(hass, member) and (found := await script_run_violations(hass, member)):
+                problems += [f"{entity_id}: this group holds {member}, which may not be run: {v}" for v in found]
+    return list(dict.fromkeys(problems))
 
 
 async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_domain: str) -> dict[str, Any]:
@@ -203,6 +275,11 @@ async def scripts_run(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, 
 
 
 def register(d: Dispatcher) -> None:
-    d.register("devices.call", devices_call)
+    async def _devices_call(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
+        # Bound to this dispatcher's capability set, read at call time, so a group cannot run a
+        # routine where `routines.run` is off (#657).
+        return await devices_call(hass, params, d.capabilities)
+
+    d.register("devices.call", _devices_call)
     d.register("scenes.activate", scenes_activate)
     d.register("scripts.run", scripts_run)
