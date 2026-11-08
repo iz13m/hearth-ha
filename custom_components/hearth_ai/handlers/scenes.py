@@ -19,6 +19,7 @@ from ..policy import _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
+from .remotes import find_remote_send_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, visible
 from .resolve import resolve_registry_ids
 
@@ -243,6 +244,8 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         # The two above are literal: a switch a `switch_as_x` helper presents as a lock, siren or valve
         # is a switch to them (#643). After registry ids are resolved, so a UUID is checked too.
         + find_gate_violations(hass, config, mode="authoring")
+        # Which remote a `remote.send_command` or `learn_command` reaches (#568, F1): box only, the hub cannot see platforms.
+        + find_remote_send_violations(hass, config)
         + await find_nested_authoring_violations(hass, config)
     )
 

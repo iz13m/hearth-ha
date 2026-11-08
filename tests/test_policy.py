@@ -954,8 +954,8 @@ def test_every_path_writing_service_is_classified() -> None:
         "matter.clear_lock_credential", "matter.clear_lock_user", "matter.get_lock_credential_status",
         "matter.get_lock_info", "matter.get_lock_users", "matter.set_lock_credential",
         "matter.set_lock_user", "mqtt.publish", "nuki.lock_n_go", "nuki.set_continuous_mode",
-        "persistent_notification.dismiss_all", "remote.delete_command", "remote.learn_command",
-        "remote.send_command", "rflink.send_command", "rfxtrx.send", "schlage.add_code",
+        "persistent_notification.dismiss_all", "remote.delete_command",
+        "rflink.send_command", "rfxtrx.send", "schlage.add_code",
         "schlage.delete_code", "schlage.get_codes", "subaru.unlock_specific_door", "system_log.write",
         "telegram_bot.download_file", "vacuum.send_command", "verisure.disable_autolock",
         "verisure.enable_autolock", "zha.clear_lock_user_code", "zha.disable_lock_user_code",
@@ -1177,40 +1177,97 @@ def test_a_valve_can_always_be_closed() -> None:
 
 
 _RF = "b64:JgBQAAABKZIUEhQ2FBIUNhQSFBIUEhQSFDYUEhQ2FBIUNhQSFDYUNhQ2FBIUEhQSFBIUNhQ2FDYUEhQSFDYUNhQ2AA0FAAAAAAAAAAAAAAAA"
-_REMOTE_REFUSED = (
-    ("send_command", {"device": "alarm_keyfob", "command": ["disarm"]}),
-    ("send_command", {"command": [_RF]}),
-    ("learn_command", {"device": "alarm_keyfob", "command": ["disarm"]}),
-    ("delete_command", {"device": "alarm_keyfob", "command": ["disarm"]}),
-)
+_REMOTE_RULE = "Hearth sends only commands the household taught the remote, never a raw b64: code"
+_NAMED = {"device": "alarm_keyfob", "command": ["disarm"]}
 
 
-def test_a_remote_code_is_refused_on_control_and_on_authoring() -> None:
-    """Mirror of `remote codes (#568)` in policy.test.ts, with Security's fixtures.
-
-    A remote plays whatever the household taught it, and an RF-capable one can learn an alarm
-    keyfob, a siren or a lock: a device Hearth refuses by domain that HA never sees as one.
-    """
-    for service, data in _REMOTE_REFUSED:
-        full = f"remote.{service}"
-        assert find_service_call_violations("remote", service, ["remote.living_room"], data) == [f"{full}: not allowed"]
-        action = {"action": full, "target": {"entity_id": "remote.living_room"}, "data": data}
-        assert find_policy_violations({"actions": [action]}) == [f"config.actions[0]: action {full} is not allowed"]
+def _remote(service: str, data: object = None) -> dict[str, object]:
+    return {"action": f"remote.{service}", "target": {"entity_id": "remote.living_room"}, "data": data}
 
 
-def test_a_remote_code_nested_in_an_authored_automation_is_refused() -> None:
-    send = {"action": "remote.send_command", "target": {"entity_id": "remote.living_room"}, "data": _REMOTE_REFUSED[0][1]}
-    automation = {
-        "alias": "Disarm when I get home",
-        "triggers": [{"trigger": "state", "entity_id": "binary_sensor.front_door", "to": "on"}],
-        "actions": [{"choose": [{"conditions": [], "sequence": [{"delay": "00:00:05"}, send]}]}],
-    }
-    assert find_policy_violations(automation) == [
-        "config.actions[0].choose[0].sequence[1]: action remote.send_command is not allowed"
+def test_a_taught_remote_code_may_be_sent_or_learned() -> None:
+    """Mirror of `remote codes (#568)` in policy.test.ts: the owner's ruling of 2026-11-08."""
+    # Literal, so adding either back to the list fails here and not only in the TypeScript suite.
+    assert "remote.send_command" not in DENIED_ACTIONS
+    assert "remote.learn_command" not in DENIED_ACTIONS
+    for service in ("send_command", "learn_command"):
+        assert find_service_call_violations("remote", service, ["remote.living_room"], _NAMED) == []
+        assert find_policy_violations({"actions": [_remote(service, _NAMED)]}) == []
+
+
+def test_deleting_a_remote_code_is_still_refused() -> None:
+    assert "remote.delete_command" in DENIED_ACTIONS
+    assert find_service_call_violations("remote", "delete_command", ["remote.living_room"], _NAMED) == ["remote.delete_command: not allowed"]
+    assert find_policy_violations({"actions": [_remote("delete_command", _NAMED)]}) == [
+        "config.actions[0]: action remote.delete_command is not allowed"
     ]
-    script = {"alias": "disarm", "sequence": [{"repeat": {"count": 2, "sequence": [send]}}]}
+
+
+def test_a_raw_remote_code_is_refused_as_a_string_or_in_a_list_in_any_case() -> None:
+    for command in (_RF, [_RF], ["power", _RF], ["B64:JgBQ"], "B64:JgBQ"):
+        assert find_service_call_violations("remote", "send_command", ["remote.living_room"], {"command": command}) == [
+            f"remote.send_command: sends a raw remote code; {_REMOTE_RULE}"
+        ]
+        assert find_policy_violations({"actions": [_remote("send_command", {"command": command})]}) == [
+            f"config.actions[0]: action remote.send_command sends a raw remote code; {_REMOTE_RULE}"
+        ]
+    action = {**_remote("send_command"), "data_template": {"command": [_RF]}}
+    del action["data"]
+    assert find_policy_violations({"actions": [action]}) == [
+        f"config.actions[0]: action remote.send_command sends a raw remote code; {_REMOTE_RULE}"
+    ]
+
+
+def test_a_remote_command_that_cannot_be_read_until_it_runs_is_refused() -> None:
+    unknowable = f"config.actions[0]: action remote.send_command sends a remote command Hearth cannot read until it runs; {_REMOTE_RULE}"
+    for data in (
+        {"command": "{{ 'b64:' ~ code }}"},
+        {"command": ["power", "{# #}b64:x"]},
+        {"command": ["power"], "{{ 'command' }}": [_RF]},
+        "{{ {'command': 'x'} }}",
+        {"command": [{"code": _RF}]},
+    ):
+        assert find_policy_violations({"actions": [_remote("send_command", data)]}) == [unknowable], data
+    # A name that merely contains the prefix, and learning under such a name, play nothing raw.
+    assert find_policy_violations({"actions": [_remote("send_command", {"command": ["preset_b64:1"]})]}) == []
+    assert find_policy_violations({"actions": [_remote("learn_command", {"command": ["b64:power"]})]}) == []
+
+
+def test_a_remote_command_is_capped_at_literal_numbers() -> None:
+    """Mirror of the caps test in policy.test.ts (Security's F4)."""
+    caps = "Hearth sends at most 10 remote commands in one call, each at most 10 times, at most 60 s apart, held at most 10 s"
+
+    def call(**extra: object) -> list[str]:
+        return find_service_call_violations("remote", "send_command", ["remote.living_room"], {"command": ["power"], **extra})
+
+    assert call(num_repeats=10, delay_secs=60, hold_secs=10) == []
+    # The list counts too (one string is one): ten is the cap, eleven is over it.
+    assert call(command=[f"ch_{i}" for i in range(10)]) == []
+    assert call(command="power") == []
+    for count in (11, 500):
+        assert call(command=[f"ch_{i}" for i in range(count)], num_repeats=10, delay_secs=60) == [
+            f"remote.send_command: sends more than 10 commands in one call; {caps}"
+        ]
+    for key, value, cap in (("num_repeats", 11, 10), ("num_repeats", "3", 10), ("num_repeats", True, 10), ("delay_secs", 60.5, 60), ("delay_secs", -1, 60), ("hold_secs", 3600, 10), ("hold_secs", "{{ 1 }}", 10)):
+        assert call(**{key: value}) == [f"remote.send_command: sets {key} to something other than a number from 0 to {cap}; {caps}"], (key, value)
+
+
+def test_a_raw_remote_code_nested_in_an_authored_automation_is_refused() -> None:
+    def automation(command: object) -> dict[str, object]:
+        send = _remote("send_command", {"device": "alarm_keyfob", "command": command})
+        return {
+            "alias": "Disarm when I get home",
+            "triggers": [{"trigger": "state", "entity_id": "binary_sensor.front_door", "to": "on"}],
+            "actions": [{"choose": [{"conditions": [], "sequence": [{"delay": "00:00:05"}, send]}]}],
+        }
+
+    assert find_policy_violations(automation([_RF])) == [
+        f"config.actions[0].choose[0].sequence[1]: action remote.send_command sends a raw remote code; {_REMOTE_RULE}"
+    ]
+    assert find_policy_violations(automation(["disarm"])) == []
+    script = {"alias": "disarm", "sequence": [{"repeat": {"count": 2, "sequence": [_remote("send_command", {"command": [_RF]})]}}]}
     assert find_policy_violations(script) == [
-        "config.sequence[0].repeat.sequence[0]: action remote.send_command is not allowed"
+        f"config.sequence[0].repeat.sequence[0]: action remote.send_command sends a raw remote code; {_REMOTE_RULE}"
     ]
 
 

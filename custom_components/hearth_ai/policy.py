@@ -6,6 +6,7 @@ denied services into automations/scripts/scenes that HA would then run on its be
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -93,14 +94,10 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "automation.turn_on",
         "automation.turn_off",
         "automation.toggle",
-        # A remote plays whatever the household taught it, and an RF-capable one (Broadlink's RM Pro)
-        # can learn an alarm keyfob, a siren or a lock: a device `DENIED_ENTITY_DOMAINS` refuses by
-        # domain that HA never sees as one. `send_command` plays a learned code by name or any raw
-        # `b64:` code; `learn_command` adds one; `delete_command` erases codes only the physical remote
-        # can teach again. On/off/toggle stay allowed (#568). Refused for every Hearth caller, not
-        # only the model: neither the app nor voice offers these.
-        "remote.send_command",
-        "remote.learn_command",
+        # Erases codes the household taught the remote, and only the physical remote can teach them
+        # again (#568). Sending a code by name and learning one are allowed by the owner's ruling of
+        # 2026-11-08, with raw codes still refused: see `_REMOTE_SEND_COMMAND` below. Refused for every
+        # Hearth caller, not only the model: neither the app nor voice offers it.
         "remote.delete_command",
         # Hands a free-form command string to the vendor library unchanged. On Roborock that reaches
         # the camera (`set_camera_status`, `start_camera_preview`), remote driving and Wi-Fi
@@ -217,6 +214,8 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         # #581 option A, the rest of the issue's sweep (HA 2026.9.3 `services.yaml`): each writes to a
         # device by bus address, register, group address, raw frame or gateway path, so it names no
         # lock, alarm or siren entity. ESPHome's per-device actions cannot be listed; option B's case.
+        # `xiaomi_miio.remote_learn_command` was `remote.learn_command` under the integration's name; that
+        # one is allowed since the owner's ruling of 2026-11-08 (#568), this one stays refused (AgDR-0072).
         "deconz.configure",
         "modbus.write_register",
         "modbus.write_coil",
@@ -366,6 +365,59 @@ def _positions_of(node: dict[str, Any]) -> list[Any] | None:
             out.append(value["position"])
     return out
 
+# Raw remote codes (#568). Mirror of REMOTE_SEND_COMMAND in policy.ts, and a separate rule on purpose
+# so it can be dropped on its own: delete the `command` loop in `_remote_command_problems` (the caps
+# stay), and the same loop in policy.ts. The platform allowlist is box-only: `handlers/remotes.py`.
+#
+# The owner ruled on 2026-11-08 that a model may send and learn remote commands, because the household
+# chose what to teach the remote. A **raw** code is different: Broadlink plays any `command` starting
+# `b64:` as the code itself (`broadlink/remote.py`), reaching a device nobody taught it. Matched
+# case-insensitively, in a string or any list element. A command that cannot be read before it runs (a
+# template, a templated key, a whole templated `data`, or a value that is not a string, number or
+# boolean) is refused too, since a template could render to `b64:`. `send_command` only:
+# `learn_command`'s `command` is the name a learned code is stored under.
+_REMOTE_SEND_COMMAND = "remote.send_command"
+_RAW_REMOTE_CODE_RE = re.compile(r"b64:", re.IGNORECASE)
+_REMOTE_RAW_CODE_RULE = "Hearth sends only commands the household taught the remote, never a raw b64: code"
+
+
+# How long one sent command may keep a transmitter busy (#568, Security's F4). Mirror of REMOTE_SEND_CAPS:
+# `num_repeats` has no upper bound in HA and the two times are bare floats, so one call could hold an
+# IR or RF transmitter (or a pressed key, through `hold_secs`) for hours. The `command` list is counted too
+# (one string is one), or 500 names would undo the rest. A literal number in range only.
+# Not part of the raw-code rule; dropping that rule keeps these.
+_REMOTE_SEND_CAPS: tuple[tuple[str, int], ...] = (("num_repeats", 10), ("delay_secs", 60), ("hold_secs", 10))
+_REMOTE_SEND_COMMANDS_MAX = 10
+_REMOTE_SEND_CAPS_RULE = "Hearth sends at most 10 remote commands in one call, each at most 10 times, at most 60 s apart, held at most 10 s"
+
+
+def _remote_command_problems(carriers: list[Any]) -> list[str]:
+    """What is wrong with a `remote.send_command`'s `command` and caps. Mirror of remoteCommandProblems."""
+    unknowable = f"sends a remote command Hearth cannot read until it runs; {_REMOTE_RAW_CODE_RULE}"
+    found: list[str] = []
+    for carrier in carriers:
+        if carrier is None:
+            continue
+        if not isinstance(carrier, dict) or _has_templated_key(carrier):
+            found.append(unknowable)
+            continue
+        command = carrier["command"] if "command" in carrier else []
+        for item in command if isinstance(command, list) else [command]:
+            if isinstance(item, str) and _RAW_REMOTE_CODE_RE.match(item):
+                found.append(f"sends a raw remote code; {_REMOTE_RAW_CODE_RULE}")
+            if (isinstance(item, str) and _TEMPLATE_RE.search(item)) or not isinstance(item, (str, int, float)):
+                found.append(unknowable)
+        if isinstance(command, list) and len(command) > _REMOTE_SEND_COMMANDS_MAX:
+            found.append(f"sends more than {_REMOTE_SEND_COMMANDS_MAX} commands in one call; {_REMOTE_SEND_CAPS_RULE}")
+        for key, cap in _REMOTE_SEND_CAPS:
+            if key not in carrier:
+                continue
+            value = carrier[key]
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= cap:
+                found.append(f"sets {key} to something other than a number from 0 to {cap}; {_REMOTE_SEND_CAPS_RULE}")
+    return list(dict.fromkeys(found))
+
+
 # Domains handled by their own capability, so device control never implicitly grants the
 # ability to run user-authored sequences.
 ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
@@ -407,6 +459,9 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
     positions = [data["position"]] if isinstance(data, dict) and "position" in data else []
     if domain == VALVE_DOMAIN and not _valve_service_closes(full, positions):
         problems.append(f"{full}: {_VALVE_CLOSING_RULE}")
+    # Raw remote codes (#568): see `_REMOTE_SEND_COMMAND`.
+    if folded == _REMOTE_SEND_COMMAND:
+        problems.extend(f"{full}: {problem}" for problem in _remote_command_problems([data]))
     if not entity_ids:
         problems.append(f"{full}: at least one entity_id is required (broad targets are not allowed)")
     for eid in entity_ids:
@@ -747,6 +802,9 @@ def find_policy_violations(config: Any, path: str = "config", *, registry_ids_re
             # A valve moves one way from here: closed (#527). The service decides, whatever it targets.
             if dom == VALVE_DOMAIN and not _valve_service_closes(action, _positions_of(node)):
                 problems.append(f"{p}: action {action} is not a service that only closes a valve; {_VALVE_CLOSING_RULE}")
+            # Raw remote codes (#568): see `_REMOTE_SEND_COMMAND`.
+            if _fold(action) == _REMOTE_SEND_COMMAND:
+                problems.extend(f"{p}: action {action} {problem}" for problem in _remote_command_problems([node.get("data"), node.get("data_template")]))
             for eid in ids:
                 if _domain(eid) == VALVE_DOMAIN and dom != VALVE_DOMAIN:
                     problems.append(f"{p}: action {action} aimed at {eid} could open a valve; {_VALVE_CLOSING_RULE}")

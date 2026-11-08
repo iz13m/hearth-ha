@@ -416,10 +416,13 @@ async def test_a_script_hearth_presents_as_a_scene_is_checked_when_it_runs(core:
     assert (await d.dispatch("scripts.run", {"entity_id": "script.film_time"}))["entity_id"] == "script.film_time"
 
 
-async def test_a_hearth_scene_script_that_sends_a_remote_code_is_refused_when_it_runs(
+async def test_a_hearth_scene_script_that_sends_a_raw_remote_code_is_refused_when_it_runs(
     core: HomeAssistant, tmp_path: Path
 ) -> None:
-    """#568: a scene stored as a labelled script cannot play a learned code, whenever it was written.
+    """#568: a scene stored as a labelled script cannot play a raw `b64:` code, whenever it was written.
+
+    A code the household taught the remote, sent by name, is allowed (the owner's ruling of
+    2026-11-08); the last part runs one through the same labelled path.
 
     The script is written to `scripts.yaml` directly, as a script authored before the refusal would
     be, so only the run-time scan stands between it and the remote. Unlabelled, it still runs: a
@@ -433,7 +436,7 @@ async def test_a_hearth_scene_script_that_sends_a_remote_code_is_refused_when_it
     sent = async_mock_service(core, "remote", "send_command")
     (tmp_path / "scripts.yaml").write_text(
         "disarm:\n  alias: Disarm\n  sequence:\n  - action: remote.send_command\n    target:\n"
-        "      entity_id: remote.living_room\n    data:\n      device: alarm_keyfob\n      command: disarm\n"
+        "      entity_id: remote.living_room\n    data:\n      device: alarm_keyfob\n      command: b64:JgBQAAABKZIUEhQ2\n"
     )
     await core.services.async_call("script", "reload", blocking=True)
     await core.async_block_till_done()
@@ -444,7 +447,7 @@ async def test_a_hearth_scene_script_that_sends_a_remote_code_is_refused_when_it
     with pytest.raises(RpcError) as ei:
         await d.dispatch("scripts.run", {"entity_id": "script.disarm"})
     assert ei.value.code == "method_not_allowed"
-    assert "action remote.send_command is not allowed" in ei.value.message
+    assert "action remote.send_command sends a raw remote code" in ei.value.message
     await core.async_block_till_done()
     assert sent == []
 
@@ -453,3 +456,16 @@ async def test_a_hearth_scene_script_that_sends_a_remote_code_is_refused_when_it
     await d.dispatch("scripts.run", {"entity_id": "script.disarm"})
     await core.async_block_till_done()
     assert [c.data.get("device") for c in sent] == ["alarm_keyfob"]
+
+    # A taught code, by name, runs through the labelled path, to a remote that plays stored names alone.
+    er.async_get(core).async_get_or_create("remote", "broadlink", "rm-1", suggested_object_id="living_room")
+    (tmp_path / "scripts.yaml").write_text(
+        "disarm:\n  alias: Disarm\n  sequence:\n  - action: remote.send_command\n    target:\n"
+        "      entity_id: remote.living_room\n    data:\n      device: television\n      command: power\n"
+    )
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+    await hl.async_mark_hearth_scene(core, "script.disarm", True)
+    await d.dispatch("scripts.run", {"entity_id": "script.disarm"})
+    await core.async_block_till_done()
+    assert [c.data.get("device") for c in sent] == ["alarm_keyfob", "television"]

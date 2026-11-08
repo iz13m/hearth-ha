@@ -18,6 +18,7 @@ from ..labels import is_hearth_scene
 from ..policy import TARGET_KEYS, VALVE_DOMAIN, find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
+from .remotes import remote_call_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
 from .scenes import scene_run_violations
 from .scripts import script_run_violations
@@ -132,6 +133,11 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
         gate = effective_domain(hass, entity_id, gates)
         if gate != entity_id.split(".", 1)[0].lower():
             raise RpcError("method_not_allowed", f"{entity_id}: this drives a {gate}; Hearth refuses it through any other domain's service")
+
+    # A remote command is sent or taught only to a remote whose integration plays stored names alone (#568, F1).
+    # After `visible()`, so an id the model may not see is still refused as unknown rather than named.
+    if problems := remote_call_violations(hass, domain, service, raw_ids):
+        raise RpcError("method_not_allowed", "; ".join(problems))
 
     for entity_id in raw_ids:
         if problems := await member_violations(hass, domain, entity_id, gates, capabilities):

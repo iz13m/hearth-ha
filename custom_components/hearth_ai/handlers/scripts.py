@@ -36,6 +36,7 @@ from .common import check_hearth_scene_kept, lock_for, plain, read_yaml, require
 from .registry import GateMap, _gates, visible
 from .resolve import resolve_registry_ids
 from .gated import find_gate_violations
+from .remotes import find_remote_send_violations
 from .scenes import (
     _config_for_entity,
     _script_raw_config,
@@ -260,6 +261,8 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str) -> list[str
     # included: this is a scene, and a scene is refused for what it touches.
     gates = _gates(hass)
     problems += gated_refusals(gates, _named_ids(config))
+    # Which remote a `remote.send_command` or `learn_command` reaches (#568, F1), as when it was authored.
+    problems += find_remote_send_violations(hass, config)
     # Templated, match-all and indirect targets, which the literal scan above cannot see (ruling 10).
     problems += _selection_refusals(hass, gates, config)
     problems += await find_nested_scene_violations(hass, config)

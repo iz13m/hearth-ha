@@ -41,8 +41,8 @@ async def test_catalog(core: HomeAssistant) -> None:
     assert await d.dispatch("areas.list", {}) == []
 
 
-async def test_a_stored_automation_that_sends_a_remote_code_cannot_be_saved_again(core: HomeAssistant, tmp_path: Path) -> None:
-    """#568: an update re-validates the whole config, so the call has to come out before it saves.
+async def test_a_stored_automation_that_sends_a_raw_remote_code_cannot_be_saved_again(core: HomeAssistant, tmp_path: Path) -> None:
+    """#568: an update re-validates the whole config, so a raw `b64:` code has to come out before it saves.
 
     Written to `automations.yaml` directly, as one authored before the refusal would be. Hearth does
     not stop it running on its own triggers (the known limit #568 records), but it will not save it.
@@ -51,7 +51,7 @@ async def test_a_stored_automation_that_sends_a_remote_code_cannot_be_saved_agai
         "- id: '1791700000000'\n  alias: Disarm when I get home\n  triggers:\n  - trigger: state\n"
         "    entity_id: input_boolean.test\n    to: 'on'\n  actions:\n  - action: remote.send_command\n"
         "    target:\n      entity_id: remote.living_room\n    data:\n      device: alarm_keyfob\n"
-        "      command: disarm\n"
+        "      command: b64:JgBQAAABKZIUEhQ2\n"
     )
     (tmp_path / "automations.yaml").write_text(stored)
     await core.services.async_call("automation", "reload", blocking=True)
@@ -62,7 +62,7 @@ async def test_a_stored_automation_that_sends_a_remote_code_cannot_be_saved_agai
     with pytest.raises(RpcError) as ei:
         await d.dispatch("automations.update", {"id": "1791700000000", "config": {**config, "alias": "Renamed"}})
     assert ei.value.code == "validation_failed"
-    assert "action remote.send_command is not allowed" in ei.value.message
+    assert "action remote.send_command sends a raw remote code" in ei.value.message
     assert (tmp_path / "automations.yaml").read_text() == stored
 
     without = {**config, "actions": [{"action": "input_boolean.turn_off", "target": {"entity_id": "input_boolean.test"}}]}

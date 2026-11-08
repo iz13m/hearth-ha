@@ -144,7 +144,7 @@ async def test_a_hidden_labelled_script_with_a_refused_step_answers_as_an_unknow
     sent = async_mock_service(core, "remote", "send_command")
     (tmp_path / "scripts.yaml").write_text(
         "disarm:\n  alias: Disarm\n  sequence:\n  - action: remote.send_command\n    target:\n"
-        "      entity_id: remote.living_room\n    data:\n      device: alarm_keyfob\n      command: disarm\n"
+        "      entity_id: remote.living_room\n    data:\n      device: alarm_keyfob\n      command: b64:JgBQAAABKZIUEhQ2\n"
     )
     await core.services.async_call("script", "reload", blocking=True)
     await core.async_block_till_done()
