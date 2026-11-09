@@ -978,6 +978,7 @@ def test_every_path_writing_service_is_classified() -> None:
         "immich.upload_file", "google_photos.upload", "onedrive.upload", "onedrive.delete",
         "conversation.process", "assist_satellite.start_conversation",
         "google_assistant_sdk.send_text_command", "alexa_devices.send_text_command",
+        "notify.google_assistant_sdk",
     )
     for service in ALL_DENIED_ACTIONS:
         assert service in DENIED_ACTIONS, (
@@ -1073,6 +1074,16 @@ def test_every_denied_action_still_exists_in_home_assistant() -> None:
                 declared = service in (yaml.safe_load(services_yaml.read_text()) or {})
             except Exception:  # noqa: BLE001
                 declared = False
+        # A legacy notify service is named after the platform that discovery loads (#782), and no
+        # services.yaml declares it: the platform must still be a legacy notify platform, and its
+        # integration must still load it by discovery under its own domain as the name.
+        if not declared and domain == "notify":
+            platform = root / service
+            declared = (
+                (platform / "notify.py").exists()
+                and "async_get_service" in (platform / "notify.py").read_text()
+                and "{CONF_NAME: DOMAIN}" in (platform / "__init__.py").read_text()
+            )
         if not declared:
             missing.append(action)
     assert not missing, (
@@ -1473,6 +1484,22 @@ def test_speaking_asking_and_reloading_intents_stay_allowed() -> None:
         if data is not None:
             node["data"] = data
         assert find_policy_violations({"actions": [node]}) == [], action
+
+
+def test_google_assistant_sdk_notify_broadcast_is_refused_on_control_and_on_authoring() -> None:
+    """Mirror of `Google Assistant SDK's notify broadcast (#782)` in policy.test.ts. Literal, as above."""
+    assert "notify.google_assistant_sdk" in DENIED_ACTIONS
+    data = {"message": "unlock the front door", "target": ["kitchen"]}
+    assert find_service_call_violations("Notify", "Google_Assistant_SDK", ["light.lamp"], data) == [
+        "Notify.Google_Assistant_SDK: not allowed"
+    ]
+    assert find_policy_violations({"actions": [{"service": "Notify.Google_Assistant_SDK", "data": data}]}) == [
+        "config.actions[0]: action Notify.Google_Assistant_SDK is not allowed"
+    ]
+    script = {"fields": {"cmd": {}}, "sequence": [{"action": "notify.google_assistant_sdk", "data": {"message": "{{ cmd }}"}}]}
+    assert find_policy_violations(script) == ["config.sequence[0]: action notify.google_assistant_sdk is not allowed"]
+    # Any other name is the box's platform check (`handlers/notify.py`), not the literal walk.
+    assert find_policy_violations({"actions": [{"action": "notify.mobile_app_x", "data": {"message": "Done"}}]}) == []
 
 
 def test_an_androidtv_service_named_in_a_form_value_is_refused() -> None:

@@ -156,6 +156,11 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "assist_satellite.start_conversation",
         "google_assistant_sdk.send_text_command",
         "alexa_devices.send_text_command",
+        # #782: Google Assistant SDK's legacy notify service sends `broadcast {message}` through the
+        # same `async_send_text_commands` as `send_text_command`. Discovery names it
+        # `notify.google_assistant_sdk`; a YAML `notify:` entry can load it under any name, which
+        # `handlers/notify.py` resolves from the platform. Mirror of the list in policy.ts.
+        "notify.google_assistant_sdk",
         # #581 option A: services that address a device by Z-Wave node, Zigbee IEEE address, MQTT
         # topic or raw 433 MHz frame, so they never name the `lock.*` entity HA exposes for the same
         # device and the domain lists cannot see them. Each can unlock a door. `zwave_js.set_value`

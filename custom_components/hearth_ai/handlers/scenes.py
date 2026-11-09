@@ -20,6 +20,7 @@ from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
 from .inputs import find_input_reachable_violations, passes_inputs
+from .notify import find_notify_violations
 from .remotes import find_nested_remote_violations, find_remote_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, run_fields, visible
 from .resolve import resolve_registry_ids
@@ -247,6 +248,8 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         + find_gate_violations(hass, config, mode="authoring")
         # Which remote a `remote.send_command` or `learn_command` reaches (#568, F1), and which activity a remote starts (#765): box only, the hub cannot see platforms or state.
         + find_remote_violations(hass, config)
+        # A notify service a denied platform is behind, under whatever name the household gave it (#782).
+        + find_notify_violations(hass, config)
         + await find_nested_authoring_violations(hass, config)
     )
 
@@ -421,6 +424,9 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         # household's fixed command. The platform allowlist is deliberately not applied here; see
         # `find_nested_remote_violations` for why.
         problems.extend(find_nested_remote_violations(raw, where))
+        # A notify service a denied platform is behind (#782), as `find_policy_violations` above
+        # refuses `notify.google_assistant_sdk` by name one hop away: the name is the household's choice.
+        problems.extend(find_notify_violations(hass, raw, where))
         # Authoring: this walk only runs from `find_config_violations` (#713).
         problems.extend(await find_nested_scene_violations(hass, raw, authoring=True))
         if inputs:

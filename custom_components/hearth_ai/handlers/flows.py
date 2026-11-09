@@ -32,6 +32,7 @@ from ..const import DOMAIN
 from ..policy import find_policy_violations, find_reference_violations
 from ..rpc import RpcError
 from .gated import find_gate_violations
+from .notify import find_notify_violations
 from .remotes import find_remote_violations
 from .resolve import resolve_registry_ids
 from .scenes import find_nested_authoring_violations
@@ -512,6 +513,8 @@ async def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     problems += find_gate_violations(hass, config, "input", mode="form")
     # Which remote a `remote.send_command` or `learn_command` in a form value reaches (#568, F1), and which activity a remote starts (#765), as for an automation.
     problems += find_remote_violations(hass, config, "input")
+    # A notify service a denied platform is behind (#782), as for an automation.
+    problems += find_notify_violations(hass, config, "input")
     # And what a scene or script the value activates would do (#721), asked exactly as it is of an
     # authored automation, over the resolved copy so a scene named by its registry id is read too.
     problems += await find_nested_authoring_violations(hass, config)

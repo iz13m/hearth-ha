@@ -18,6 +18,7 @@ from ..labels import is_hearth_scene
 from ..policy import TARGET_KEYS, VALVE_DOMAIN, find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
+from .notify import notify_call_violations
 from .remotes import remote_call_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
 from .scenes import scene_run_violations
@@ -105,6 +106,11 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
         raise RpcError("invalid_params", "at most 50 entities per call")
 
     if violations := find_service_call_violations(domain, service, raw_ids, params.get("data")):
+        raise RpcError("method_not_allowed", "; ".join(violations))
+
+    # HA's legacy notify schema takes no `entity_id`, so this call would fail anyway; refused in
+    # Hearth's words regardless, as `find_service_call_violations` refuses the discovered name (#782).
+    if violations := notify_call_violations(hass, domain, service):
         raise RpcError("method_not_allowed", "; ".join(violations))
 
     if not hass.services.has_service(domain, service):
