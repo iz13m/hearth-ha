@@ -38,6 +38,7 @@ from .resolve import resolve_registry_ids
 from .gated import find_gate_violations
 from .notify import find_notify_violations
 from .remotes import find_remote_violations
+from .water_heater import find_water_heater_violations
 from .scenes import (
     _config_for_entity,
     _script_raw_config,
@@ -277,6 +278,8 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str, data: Any =
     problems += find_remote_violations(hass, config)
     # A notify service a denied platform is behind (#782), as when it was authored.
     problems += find_notify_violations(hass, config)
+    # A water heater's exact ceiling (#560), as when it was authored.
+    problems += find_water_heater_violations(hass, config)
     # Templated, match-all and indirect targets, which the literal scan above cannot see (ruling 10).
     problems += _selection_refusals(hass, gates, config)
     problems += await find_nested_scene_violations(hass, config)

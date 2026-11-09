@@ -23,6 +23,7 @@ from .remotes import remote_call_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
 from .scenes import scene_run_violations
 from .scripts import script_run_violations
+from .water_heater import water_heater_call_violations
 
 # Service calls can legitimately take a while (thermostats, media players); scripts return
 # as soon as they start.
@@ -143,6 +144,11 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
     # A remote command is sent or taught only to a remote whose integration plays stored names alone (#568, F1).
     # After `visible()`, so an id the model may not see is still refused as unknown rather than named.
     if problems := remote_call_violations(hass, domain, service, raw_ids, params.get("data")):
+        raise RpcError("method_not_allowed", "; ".join(problems))
+
+    # A water heater's exact ceiling, in the home's unit and against its own max_temp (#560). After
+    # `visible()`, so an id the model may not see is still refused as unknown rather than named.
+    if problems := water_heater_call_violations(hass, domain, service, raw_ids, params.get("data")):
         raise RpcError("method_not_allowed", "; ".join(problems))
 
     for entity_id in raw_ids:

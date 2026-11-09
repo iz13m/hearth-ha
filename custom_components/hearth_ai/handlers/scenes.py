@@ -24,6 +24,7 @@ from .notify import find_notify_violations
 from .remotes import find_nested_remote_violations, find_remote_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, run_fields, visible
 from .resolve import resolve_registry_ids
+from .water_heater import find_water_heater_violations, group_water_heater_refusals, scene_water_heater_violations
 
 
 def _path(hass: HomeAssistant) -> str:
@@ -40,6 +41,8 @@ def _validate(hass: HomeAssistant, config: dict[str, Any]) -> None:
     violations = find_scene_policy_violations(config) + find_scene_write_violations(config) + find_reference_violations(config, "config")
     # A switch a `switch_as_x` helper presents as a lock, siren or valve is a switch to the two above (#643).
     violations += find_gate_violations(hass, config, mode="scene")
+    # A water heater's exact ceiling, in the home's unit (#560): the two above refuse only what is over in any unit.
+    violations += scene_water_heater_violations(hass, config.get("entities"))
     if violations:
         raise RpcError("validation_failed", "policy: " + "; ".join(violations))
     try:
@@ -143,6 +146,16 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
         ]
     if config:
         problems += find_scene_policy_violations(config)
+        # A water heater's exact ceiling (#560), a household's own scene included: the council reversed
+        # #557's grandfathering for the run path.
+        problems += scene_water_heater_violations(hass, config.get("entities"))
+    else:
+        # As for a valve: without scenes.yaml the temperature a water heater is set to cannot be read (#560).
+        problems += [
+            f"{eid}: this scene sets a water heater and Hearth cannot read its temperature, so it cannot be activated"
+            for eid in members
+            if eid.split(".", 1)[0].lower() == "water_heater"
+        ]
     # A group's `reproduce_state` sets every member: `group.doors: unlocked` unlocks each lock in it.
     # So each group is walked and every member judged as if the scene set it directly (#714), once
     # however many of the two sources name it: the config and the attribute used to refuse one group
@@ -192,6 +205,13 @@ def group_refusals(hass: HomeAssistant, group: str, value: Any, gates: GateMap) 
         UNREACHABLE_SCENE if hidden else f"{group}: this group holds {eid}, and a scene may only close a valve"
         for eid in reached
         if eid.split(".", 1)[0] == VALVE_DOMAIN and not closes
+    ]
+    # A water heater in the group gets the group's stored attributes, its `temperature` included (#560).
+    problems += [
+        UNREACHABLE_SCENE if hidden else f"{group}: this group holds {eid}; {why}"
+        for eid in reached
+        if eid.split(".", 1)[0] == "water_heater"
+        for why in group_water_heater_refusals(hass, eid, value)
     ]
     return list(dict.fromkeys(problems))
 
@@ -250,6 +270,8 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         + find_remote_violations(hass, config)
         # A notify service a denied platform is behind, under whatever name the household gave it (#782).
         + find_notify_violations(hass, config)
+        # A water heater's exact ceiling, in the home's unit and against its own max_temp (#560).
+        + find_water_heater_violations(hass, config)
         + await find_nested_authoring_violations(hass, config)
     )
 

@@ -531,6 +531,112 @@ def _notify_icon_problems(carriers: list[Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# A water heater's target is capped at 60 °C for safety (#560, AgDR-0075). Mirror of the
+# WATER_HEATER_DOMAIN block in policy.ts, whose comment says why, and a separate block on purpose.
+# Home Assistant's `set_temperature` takes any number and a scene sends its stored `temperature` the
+# same way, so only the vendor stands between the value and the tank. These walkers know neither the
+# home's unit nor the entity's `max_temp`, so they refuse a temperature that is not a literal number
+# or is above 140 (over the ceiling in either unit); `handlers/water_heater.py` applies the exact
+# ceiling, 60 °C or 140 °F or the entity's own `max_temp` if lower, wherever the box can read the home.
+# Never clamped. A mode may be only off, eco, electric, gas or heat_pump, compared exactly; a scene
+# Hearth writes may store only `on` or one of those, and a household's own scene keeps its mode when it
+# runs (#713's line). `set_away_mode` is allowed (a setback; it can only lower the target); any other
+# `water_heater` service is refused, an allowlist. A `scene.create` snapshot is not refused.
+WATER_HEATER_DOMAIN = "water_heater"
+WATER_HEATER_CEILING: Mapping[str, int] = MappingProxyType({"°C": 60, "°F": 140})
+_WATER_HEATER_UNITLESS_CEILING = WATER_HEATER_CEILING["°F"]
+_WATER_HEATER_SERVICES = ("turn_on", "turn_off", "set_away_mode", "set_temperature", "set_operation_mode")
+WATER_HEATER_MODES: tuple[str, ...] = ("off", "eco", "electric", "gas", "heat_pump")
+_WATER_HEATER_SCENE_STATES = ("on", *WATER_HEATER_MODES)
+WATER_HEATER_CEILING_RULE = (
+    "a water heater is capped at 60 °C (140 °F) for safety, or at its own max_temp if that is lower, and the value must be a literal number; Hearth refuses rather than lowers it, so set 60 °C or less, or set a higher value on the heater itself"
+    " / سخان الماء محدود بـ 60 درجة مئوية (140 فهرنهايت) للسلامة، أو بالحد الأقصى للجهاز إن كان أقل؛ اختر 60 أو أقل، أو اضبط القيمة الأعلى من السخان نفسه"
+)
+WATER_HEATER_MODE_RULE = (
+    "a water heater's mode may be set from Hearth only to off, eco, electric, gas or heat_pump, named literally; set any other mode on the heater itself"
+    " / يمكن ضبط وضع سخان الماء من أذكى على off أو eco أو electric أو gas أو heat_pump فقط؛ اضبط أي وضع آخر من السخان نفسه"
+)
+_WATER_HEATER_SERVICE_RULE = "Hearth calls only turn_on, turn_off, set_away_mode, set_temperature and set_operation_mode on a water heater"
+
+
+def is_literal_number(value: Any) -> bool:
+    """A finite int or float. Not a bool (which Python calls a number), not a string: either needs coercing."""
+    import math  # noqa: PLC0415
+
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _water_heater_temperature_problems(value: Any) -> list[str]:
+    """Mirror of waterHeaterTemperatureProblems."""
+    if not is_literal_number(value):
+        return [f"sets a temperature that is not a literal number; {WATER_HEATER_CEILING_RULE}"]
+    if value > _WATER_HEATER_UNITLESS_CEILING:
+        return [f"sets a temperature above the ceiling; {WATER_HEATER_CEILING_RULE}"]
+    return []
+
+
+def _water_heater_service_problems(service: str, carriers: list[Any]) -> list[str]:
+    """What is wrong with a call to `water_heater.<service>` sending `carriers`. Mirror of waterHeaterServiceProblems."""
+    s = _fold(service)
+    if s not in _WATER_HEATER_SERVICES:
+        return [f"is not a water heater service Hearth has checked; {_WATER_HEATER_SERVICE_RULE}"]
+    if s not in ("set_temperature", "set_operation_mode"):
+        return []
+    problems: list[str] = []
+    temperatures: list[Any] = []
+    modes: list[Any] = []
+    unreadable = False
+    for carrier in carriers:
+        if carrier is None:
+            continue
+        # A templated key is rendered, and the later of two equal keys wins, as for a valve's position.
+        if not isinstance(carrier, dict) or _has_templated_key(carrier):
+            unreadable = True
+            continue
+        if "temperature" in carrier:
+            temperatures.append(carrier["temperature"])
+        if "operation_mode" in carrier:
+            modes.append(carrier["operation_mode"])
+    rule = WATER_HEATER_CEILING_RULE if s == "set_temperature" else WATER_HEATER_MODE_RULE
+    if unreadable:
+        problems.append(f"carries data Hearth cannot read until it runs; {rule}")
+    elif s == "set_temperature" and not temperatures:
+        problems.append(f"names no temperature Hearth can check; {rule}")
+    elif s == "set_operation_mode" and not modes:
+        problems.append(f"names no mode Hearth can check; {rule}")
+    for t in temperatures:
+        problems.extend(_water_heater_temperature_problems(t))
+    for m in modes:
+        if not isinstance(m, str) or m not in WATER_HEATER_MODES:
+            problems.append(f"sets a mode Hearth does not set; {WATER_HEATER_MODE_RULE}")
+    return list(dict.fromkeys(problems))
+
+
+def _water_heater_scene_temperature_problems(value: Any) -> list[str]:
+    """Mirror of waterHeaterSceneTemperatureProblems."""
+    return _water_heater_temperature_problems(value["temperature"]) if isinstance(value, dict) and "temperature" in value else []
+
+
+def _water_heater_scene_mode_problems(value: Any) -> list[str]:
+    """Mirror of waterHeaterSceneModeProblems: the state a **written** scene stores for a water heater."""
+    state = value.get("state") if isinstance(value, dict) else value
+    if isinstance(state, str) and state in _WATER_HEATER_SCENE_STATES:
+        return []
+    return [f"a scene may set a water heater only to on or one of its allowed modes; {WATER_HEATER_MODE_RULE}"]
+
+
+def _scene_water_heater_problems(node: dict[str, Any]) -> list[str]:
+    """Every water heater a scene service sets, and what is wrong with it. Mirror of sceneWaterHeaterProblems."""
+    problems: list[str] = []
+    for src in (node, node.get("data"), node.get("data_template")):
+        if not isinstance(src, dict) or not isinstance(src.get("entities"), dict):
+            continue
+        for eid, v in src["entities"].items():
+            if _domain(eid) == WATER_HEATER_DOMAIN:
+                problems.extend(f"{eid}: {problem}" for problem in _water_heater_scene_mode_problems(v) + _water_heater_scene_temperature_problems(v))
+    return problems
+
+
 # Domains handled by their own capability, so device control never implicitly grants the
 # ability to run user-authored sequences.
 ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
@@ -572,6 +678,10 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
     positions = [data["position"]] if isinstance(data, dict) and "position" in data else []
     if domain == VALVE_DOMAIN and not _valve_service_closes(full, positions):
         problems.append(f"{full}: {_VALVE_CLOSING_RULE}")
+    # A water heater's temperature and mode (#560): see `WATER_HEATER_DOMAIN`. Leaving `data` out
+    # refuses `set_temperature`, as for a valve's position.
+    if domain == WATER_HEATER_DOMAIN:
+        problems.extend(f"{full}: {problem}" for problem in _water_heater_service_problems(service, [data]))
     # Raw remote codes (#568): see `_REMOTE_SEND_COMMAND`.
     if folded == _REMOTE_SEND_COMMAND:
         problems.extend(f"{full}: {problem}" for problem in _remote_command_problems([data]))
@@ -929,6 +1039,10 @@ def find_policy_violations(config: Any, path: str = "config", *, registry_ids_re
             # A valve moves one way from here: closed (#527). The service decides, whatever it targets.
             if dom == VALVE_DOMAIN and not _valve_service_closes(action, _positions_of(node)):
                 problems.append(f"{p}: action {action} is not a service that only closes a valve; {_VALVE_CLOSING_RULE}")
+            # A water heater's temperature and mode (#560): see `WATER_HEATER_DOMAIN`.
+            if dom == WATER_HEATER_DOMAIN:
+                carriers = [node.get("data"), node.get("data_template")]
+                problems.extend(f"{p}: action {action} {problem}" for problem in _water_heater_service_problems(_fold(action)[len(dom) + 1 :], carriers))
             # Raw remote codes (#568): see `_REMOTE_SEND_COMMAND`.
             if _fold(action) == _REMOTE_SEND_COMMAND:
                 problems.extend(f"{p}: action {action} {problem}" for problem in _remote_command_problems([node.get("data"), node.get("data_template")]))
@@ -944,6 +1058,8 @@ def find_policy_violations(config: Any, path: str = "config", *, registry_ids_re
             if dom == "scene":
                 problems.extend(f"{p}: action {action} could leave {eid} open; a scene may only close a valve" for eid in _scene_valve_ids(node))
                 problems.extend(_scene_template_violations(node, action, p))
+                # A water heater a scene service sets (#560): its temperature and its mode.
+                problems.extend(f"{p}: action {action} sets {problem}" for problem in _scene_water_heater_problems(node))
                 scene_ids = _scene_entity_ids(node)
                 problems.extend(_scene_unsettable_violations(scene_ids, action, p))
                 ids += scene_ids
@@ -1120,6 +1236,12 @@ def find_scene_policy_violations(config: Any) -> list[str]:
     # `find_scene_write_violations`.
     return [f"entities.{eid}: denied domain {_domain(eid)}" for eid in entities if _domain(eid) in DENIED_ENTITY_DOMAINS] + [
         f"entities.{eid}: a scene may only close a valve" for eid, v in entities.items() if _domain(eid) == VALVE_DOMAIN and not _valve_state_closes(v)
+    ] + [
+        # A water heater's temperature (#560), when the scene is written and whenever it runs.
+        f"entities.{eid}: {problem}"
+        for eid, v in entities.items()
+        if _domain(eid) == WATER_HEATER_DOMAIN
+        for problem in _water_heater_scene_temperature_problems(v)
     ]
 
 
@@ -1148,4 +1270,6 @@ def find_scene_write_violations(config: Any) -> list[str]:
         # lock in it. Write only since #714: a household scene's groups are walked when it runs.
         if _domain(eid) == _GROUP_DOMAIN:
             problems.append(f"entities.{eid}: a scene may not set a group; what its members are cannot be checked here")
+    # A water heater's mode (#560), at write only: a household's own scene keeps its mode when it runs.
+    problems.extend(f"entities.{eid}: {problem}" for eid, v in entities.items() if _domain(eid) == WATER_HEATER_DOMAIN for problem in _water_heater_scene_mode_problems(v))
     return problems
