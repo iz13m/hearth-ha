@@ -143,6 +143,19 @@ DENIED_ACTIONS: frozenset[str] = frozenset(
         "smtp.send_message",
         "opendisplay.upload_image",
         "media_extractor.extract_media_url",
+        # #779: services that hand free text to a voice assistant that acts on devices, so the action
+        # is chosen after every check here has run and names no entity for the domain lists to see.
+        # `conversation.process` runs the text through a conversation agent, and the built-in one
+        # turns "unlock the front door" into `lock.unlock` on an Assist-exposed lock, and a valve's
+        # HassTurnOn into `open_valve` (`intent/__init__.py`). `assist_satellite.start_conversation`
+        # puts `extra_system_prompt` (or `start_message`) into an LLM agent's system prompt for the
+        # next utterance. The two `send_text_command`s hand text to Google Assistant or Alexa, which
+        # control whatever is linked to them. `conversation.reload`, `assist_satellite.announce` and
+        # `ask_question` (stops at speech-to-text) stay. Mirror of the list in policy.ts.
+        "conversation.process",
+        "assist_satellite.start_conversation",
+        "google_assistant_sdk.send_text_command",
+        "alexa_devices.send_text_command",
         # #581 option A: services that address a device by Z-Wave node, Zigbee IEEE address, MQTT
         # topic or raw 433 MHz frame, so they never name the `lock.*` entity HA exposes for the same
         # device and the domain lists cannot see them. Each can unlock a door. `zwave_js.set_value`

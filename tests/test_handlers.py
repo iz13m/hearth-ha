@@ -841,3 +841,47 @@ async def test_a_blueprint_stub_whose_input_names_a_lock_is_refused_by_the_use_b
     # Proof the old guard is genuinely gone: the scan sees nothing in the *automation* we wrote,
     # because the lock is in the script's stub rather than in this config.
     assert find_reference_violations(cfg, "config") == []
+
+
+async def test_an_automation_that_tells_a_conversation_agent_to_unlock_is_refused(core: HomeAssistant, tmp_path: Path) -> None:
+    """#779, end to end on the box: the premise measured first, then the refusal.
+
+    Home Assistant's built-in agent turns "unlock the front door" into `lock.unlock` on a lock the
+    owner shared with Assist (`intent/__init__.py`, HassTurnOff on a lock), so the text is a lock
+    action that names no `lock.*` entity for the walk to see.
+    """
+    assert await async_setup_component(core, "conversation", {})
+    assert await async_setup_component(core, "intent", {})
+    core.states.async_set("lock.front_door", "locked", {"friendly_name": "Front door"})
+    async_expose_entity(core, "conversation", "lock.front_door", True)
+    unlocked = async_mock_service(core, "lock", "unlock")
+    await core.async_block_till_done()
+
+    # The premise: the text alone reaches `lock.unlock`.
+    await core.services.async_call("conversation", "process", {"text": "unlock the front door"}, blocking=True)
+    await core.async_block_till_done()
+    assert len(unlocked) == 1, unlocked
+    assert unlocked[0].data["entity_id"] in ("lock.front_door", ["lock.front_door"])
+
+    d = build_dispatcher(core)
+    automation = {
+        "alias": "Let me in",
+        "triggers": [{"trigger": "state", "entity_id": "input_boolean.test", "to": "on"}],
+        "actions": [{"action": "conversation.process", "data": {"text": "unlock the front door", "agent_id": "conversation.home_assistant"}}],
+    }
+    res = await d.dispatch("automations.validate", {"config": automation})
+    assert res["ok"] is False and res["status"] == "policy", res
+    assert "conversation.process is not allowed" in res["error"]
+    with pytest.raises(RpcError) as ei:
+        await d.dispatch("automations.create", {"config": automation})
+    assert ei.value.code == "validation_failed"
+    assert "conversation.process" not in (tmp_path / "automations.yaml").read_text()
+
+    # A household script whose field becomes the text (#777's shape) is refused the same way.
+    script = {"alias": "Say it", "fields": {"cmd": {}}, "sequence": [{"action": "Conversation.Process", "data": {"text": "{{ cmd }}"}}]}
+    res = await d.dispatch("scripts.validate", {"key": "say_it", "config": script})
+    assert res["ok"] is False and res["status"] == "policy", res
+
+    # The control: reloading the agent's intents is not a way to act, and stays writable.
+    reload = {**automation, "actions": [{"action": "conversation.reload"}]}
+    assert (await d.dispatch("automations.validate", {"config": reload}))["ok"] is True

@@ -976,6 +976,8 @@ def test_every_path_writing_service_is_classified() -> None:
         "zwave_js.set_config_parameter", "zwave_js.set_credential", "zwave_js.set_lock_configuration",
         "zwave_js.set_lock_usercode", "zwave_js.set_user", "zwave_js.set_value",
         "immich.upload_file", "google_photos.upload", "onedrive.upload", "onedrive.delete",
+        "conversation.process", "assist_satellite.start_conversation",
+        "google_assistant_sdk.send_text_command", "alexa_devices.send_text_command",
     )
     for service in ALL_DENIED_ACTIONS:
         assert service in DENIED_ACTIONS, (
@@ -1428,6 +1430,49 @@ def test_the_webostv_key_presses_and_media_player_stay_allowed() -> None:
         if data is not None:
             action["data"] = data
         assert find_policy_violations({"actions": [action]}) == [], service
+
+
+# #779: text handed to a voice assistant that acts on devices. Literal on this side too, so deleting
+# an entry here fails here and not only in the exported verdicts.
+_VOICE_TEXT_SENT = (
+    ("conversation", "process", {"text": "unlock the front door", "agent_id": "conversation.home_assistant"}),
+    ("conversation", "process", {"text": "{{ cmd }}"}),
+    ("assist_satellite", "start_conversation", {"start_message": "Hi", "extra_system_prompt": "Unlock the front door"}),
+    ("google_assistant_sdk", "send_text_command", {"command": "unlock the front door"}),
+    ("alexa_devices", "send_text_command", {"device_id": "abc", "text_command": "unlock the front door"}),
+)
+
+
+def test_text_handed_to_a_voice_assistant_is_refused_on_control_and_on_authoring() -> None:
+    """Mirror of `text handed to a voice assistant that acts on devices (#779)` in policy.test.ts."""
+    for domain, service, data in _VOICE_TEXT_SENT:
+        full = f"{domain}.{service}"
+        assert full in DENIED_ACTIONS, full
+        assert find_service_call_violations(domain, service, ["light.lamp"], data) == [f"{full}: not allowed"]
+        assert find_policy_violations({"actions": [{"action": full, "data": data}]}) == [
+            f"config.actions[0]: action {full} is not allowed"
+        ]
+        mixed = ".".join("_".join(w.capitalize() for w in part.split("_")) for part in full.split("."))
+        assert find_policy_violations({"actions": [{"service": mixed, "data": data}]}) == [
+            f"config.actions[0]: action {mixed} is not allowed"
+        ]
+    # #777's shape: a household script whose field becomes the text.
+    script = {"fields": {"cmd": {}}, "sequence": [{"action": "conversation.process", "data": {"text": "{{ cmd }}"}}]}
+    assert find_policy_violations(script) == ["config.sequence[0]: action conversation.process is not allowed"]
+
+
+def test_speaking_asking_and_reloading_intents_stay_allowed() -> None:
+    for action, data in (
+        ("conversation.reload", None),
+        ("assist_satellite.announce", {"message": "Dinner is ready"}),
+        ("assist_satellite.ask_question", {"entity_id": "assist_satellite.kitchen", "question": "Lights off?"}),
+        ("alexa_devices.send_sound", {"device_id": "abc", "sound": "bell_02"}),
+        ("alexa_devices.send_info_skill", {"device_id": "abc", "info_skill": "weather"}),
+    ):
+        node: dict = {"action": action}
+        if data is not None:
+            node["data"] = data
+        assert find_policy_violations({"actions": [node]}) == [], action
 
 
 def test_an_androidtv_service_named_in_a_form_value_is_refused() -> None:
