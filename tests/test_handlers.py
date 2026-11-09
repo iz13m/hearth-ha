@@ -41,6 +41,20 @@ async def test_catalog(core: HomeAssistant) -> None:
     assert await d.dispatch("areas.list", {}) == []
 
 
+async def test_automations_validate_refuses_a_notification_icon_read_from_a_file(core: HomeAssistant) -> None:
+    """#771: LG webOS opens whatever `data.icon` names and sends it to the TV. Refused on the box, end to end."""
+    d = build_dispatcher(core)
+
+    def notify(icon: str) -> dict[str, Any]:
+        return {**AUTOMATION, "actions": [{"action": "notify.living_room_tv", "data": {"message": "Dinner", "data": {"icon": icon}}}]}
+
+    for icon in ("/config/secrets.yaml", "/dev/zero", "../x", "file:///etc/passwd", "{{ '/config/secrets.yaml' }}"):
+        res = await d.dispatch("automations.validate", {"config": notify(icon)})
+        assert res["ok"] is False and res["status"] == "policy" and "notification icon" in res["error"], icon
+    for icon in ("mdi:bell", "https://example.com/a.png"):
+        assert (await d.dispatch("automations.validate", {"config": notify(icon)}))["ok"] is True, icon
+
+
 async def test_a_stored_automation_that_sends_a_raw_remote_code_cannot_be_saved_again(core: HomeAssistant, tmp_path: Path) -> None:
     """#568: an update re-validates the whole config, so a raw `b64:` code has to come out before it saves.
 

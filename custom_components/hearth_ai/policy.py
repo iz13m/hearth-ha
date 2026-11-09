@@ -459,6 +459,60 @@ def _remote_activity_problems(carriers: list[Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# A notification icon that names a file on the Home Assistant host (#771). Mirror of NOTIFY_DOMAIN in
+# policy.ts. LG webOS's notify platform passes `data.icon` to aiowebostv's `send_message(icon_path=...)`,
+# whose `read_icon` opens any path with no `is_allowed_path` check and sends it to the TV (HA 2026.9.3,
+# `webostv/notify.py`), so `icon: /config/secrets.yaml` carried every integration's tokens off the box.
+# Matched on shape, since notify service names are per household: in any `notify.*` action, a `data`
+# mapping at any depth whose `icon` is not a literal `mdi:` icon name or a plain `http(s)` URL
+# (`_notify_icon_allowed`, scheme in any case) is refused, as is a templated key, a whole templated `data`, or a templated nested
+# `data`. Other attachment keys wait on the owner's ruling (#771). Write only on the hub, like the remote rules.
+_NOTIFY_DOMAIN = "notify"
+# The whole value is anchored (`fullmatch`), not only its prefix: webOS opens `mdi:/../../config/secrets.yaml`
+# as a relative path. A URL is printable ASCII with no space, no backslash and no `..` segment. `re.ASCII` keeps
+# IGNORECASE from folding U+212A or U+017F into `k`/`s`, which the hub's regex does not.
+_NOTIFY_MDI_ICON_RE = re.compile(r"mdi:[a-z0-9_-]+", re.IGNORECASE | re.ASCII)
+_NOTIFY_URL_ICON_RE = re.compile(r"https?://[\x21-\x7e]+", re.IGNORECASE | re.ASCII)
+_NOTIFY_URL_ICON_BAD_RE = re.compile(r"\\|(^|/)\.\.(/|\Z|[?#])")
+
+
+def _notify_icon_allowed(icon: str) -> bool:
+    """Mirror of notifyIconAllowed."""
+    return bool(_NOTIFY_MDI_ICON_RE.fullmatch(icon)) or (bool(_NOTIFY_URL_ICON_RE.fullmatch(icon)) and not _NOTIFY_URL_ICON_BAD_RE.search(icon))
+_NOTIFY_ICON_RULE = "a notification icon must be a literal mdi: icon or an http(s) URL, never a file on the Home Assistant host"
+
+
+def _notify_icon_problems(carriers: list[Any]) -> list[str]:
+    """What is wrong with the `icon` in each carrier (`data`, `data_template`) of a `notify.*` action. Mirror of notifyIconProblems."""
+    unknowable = f"carries notification data Hearth cannot read until it runs, which could name an icon file; {_NOTIFY_ICON_RULE}"
+    found: list[str] = []
+
+    def visit(mapping: dict[Any, Any]) -> None:
+        if _has_templated_key(mapping):
+            found.append(unknowable)
+        if "icon" in mapping:
+            icon = mapping["icon"]
+            if not isinstance(icon, str) or _TEMPLATE_RE.search(icon) or not _notify_icon_allowed(icon):
+                found.append(f"sets a notification icon that could be a file; {_NOTIFY_ICON_RULE}")
+        if "data" in mapping:
+            inner = mapping["data"]
+            if isinstance(inner, dict):
+                visit(inner)
+            # A string is a template or a literal; a list or a scalar renders to itself. Anything else is
+            # a `Template` from the second walk over the config as Home Assistant validated it.
+            elif (isinstance(inner, str) and _TEMPLATE_RE.search(inner)) or not isinstance(inner, (str, int, float, list, type(None))):
+                found.append(unknowable)
+
+    for carrier in carriers:
+        if carrier is None:
+            continue
+        if not isinstance(carrier, dict):
+            found.append(unknowable)
+        else:
+            visit(carrier)
+    return list(dict.fromkeys(found))
+
+
 # Domains handled by their own capability, so device control never implicitly grants the
 # ability to run user-authored sequences.
 ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
@@ -506,6 +560,10 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
     # A remote activity (#765): see `_REMOTE_ACTIVITY_SERVICES`.
     if folded in _REMOTE_ACTIVITY_SERVICES:
         problems.extend(f"{full}: {problem}" for problem in _remote_activity_problems([data]))
+    # A notification icon read from a file (#771): see `_NOTIFY_DOMAIN`. A backstop: the legacy notify
+    # schema refuses most of what this reads, but the rule should not depend on that.
+    if domain == _NOTIFY_DOMAIN:
+        problems.extend(f"{full}: {problem}" for problem in _notify_icon_problems([data]))
     # Script variables (#765): see `_VARIABLES_RULE`.
     if isinstance(data, dict) and "variables" in data:
         problems.append(f"{full}: {_VARIABLES_RULE}")
@@ -859,6 +917,9 @@ def find_policy_violations(config: Any, path: str = "config", *, registry_ids_re
             # A remote activity (#765): see `_REMOTE_ACTIVITY_SERVICES`.
             if _fold(action) in _REMOTE_ACTIVITY_SERVICES:
                 problems.extend(f"{p}: action {action} {problem}" for problem in _remote_activity_problems([node.get("data"), node.get("data_template")]))
+            # A notification icon read from a file (#771): see `_NOTIFY_DOMAIN`.
+            if dom == _NOTIFY_DOMAIN:
+                problems.extend(f"{p}: action {action} {problem}" for problem in _notify_icon_problems([node.get("data"), node.get("data_template")]))
             for eid in ids:
                 if _domain(eid) == VALVE_DOMAIN and dom != VALVE_DOMAIN:
                     problems.append(f"{p}: action {action} aimed at {eid} could open a valve; {_VALVE_CLOSING_RULE}")

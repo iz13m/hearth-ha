@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1772,3 +1773,59 @@ def test_a_caller_that_resolved_registry_ids_is_not_refused_one_twice() -> None:
         {"action": "homeassistant.turn_on", "target": {"entity_id": ["siren.hall", _SIREN_REGISTRY_ID]}},
     ):
         assert find_policy_violations({"actions": [node]}, registry_ids_resolved=True), node
+
+
+_NOTIFY_RULE = "a notification icon must be a literal mdi: icon or an http(s) URL, never a file on the Home Assistant host"
+_NOTIFY_FILE = f"sets a notification icon that could be a file; {_NOTIFY_RULE}"
+_NOTIFY_UNREADABLE = f"carries notification data Hearth cannot read until it runs, which could name an icon file; {_NOTIFY_RULE}"
+
+
+def test_a_notification_icon_read_from_a_file_is_refused() -> None:
+    """#771, mirror of the policy.test.ts block. LG webOS opens whatever `data.icon` names and sends it to the TV."""
+    refused: list[Any] = ["/config/secrets.yaml", "/dev/zero", "../x", "secrets.yaml", "file:///etc/passwd", "FILE:///etc/passwd", "mdi:{{ x }}", "{{ icon }}", "", " mdi:bell", 3, True, None, ["mdi:bell"],
+        # The whole value is anchored: a prefix is not enough.
+        "mdi:/../../config/secrets.yaml", "https:/../config/secrets.yaml", "mdi:x\n/x", "mdi:bell\n", "https://h/../../x", "https://h/..", "https://h/..?x", "HTTPS://h/../x",
+        "https://h\\x", "https://h /x", "https://h/\x00x", "https://h/\ttab", "mdi:\u212aey", "https://h/\u00e9"]
+    for action in ("notify.living_room_tv", "Notify.Living_Room_Tv", "NOTIFY.SEND_MESSAGE"):
+        for icon in refused:
+            for carrier in (
+                {"data": {"message": "x", "data": {"icon": icon}}},
+                {"data": {"message": "x", "icon": icon}},
+                {"data": {"message": "x", "data": {"data": {"icon": icon}}}},
+                {"data_template": {"message": "x", "data": {"icon": icon}}},
+            ):
+                assert find_policy_violations({"actions": [{"action": action, **carrier}]}) == [f"config.actions[0]: action {action} {_NOTIFY_FILE}"], (action, icon)
+    for icon in refused:
+        got = find_service_call_violations("Notify", "Send_Message", ["notify.living_room_tv"], {"message": "x", "data": {"icon": icon}})
+        assert got == [f"Notify.Send_Message: {_NOTIFY_FILE}"], icon
+    tv = "notify.living_room_tv"
+    for carrier in (
+        {"data": {"message": "x", "data": {"{{ 'icon' }}": "/config/secrets.yaml"}}},
+        {"data": {"message": "x", "data": "{{ {'icon': '/config/secrets.yaml'} }}"}},
+        {"data": "{{ {'message': 'x', 'data': {'icon': '/x'}} }}"},
+    ):
+        assert find_policy_violations({"actions": [{"action": tv, **carrier}]}) == [f"config.actions[0]: action {tv} {_NOTIFY_UNREADABLE}"], carrier
+
+
+def test_a_notification_icon_that_is_an_mdi_icon_or_a_url_is_allowed() -> None:
+    for icon in ("mdi:bell", "MDI:Bell", "mdi:bell-ring_outline", "https://example.com/a.png", "HTTPS://example.com/a.png", "Http://192.168.1.10/a.png", "https://example.com/a..b/i.png?v=1&w=%2E%2E"):
+        assert find_policy_violations({"actions": [{"action": "notify.living_room_tv", "data": {"message": "x", "data": {"icon": icon}}}]}) == [], icon
+        assert find_service_call_violations("notify", "living_room_tv", ["notify.living_room_tv"], {"message": "x", "data": {"icon": icon}}) == [], icon
+    assert find_policy_violations({"actions": [{"action": "persistent_notification.create", "data": {"message": "x", "notification_id": "a"}}]}) == []
+    assert find_policy_violations({"actions": [{"action": "notify.persistent_notification", "data": {"message": "x", "data": {"notification_id": "a"}}}]}) == []
+    button = {"action": "notify.mobile_app_phone", "data": {"message": "x", "data": {"actions": [{"action": "A", "title": "B", "icon": "sfsymbols:bell"}]}}}
+    assert find_policy_violations({"actions": [button]}) == []
+    # Other attachment keys wait on the owner's ruling (#771).
+    attach = {"action": "notify.living_room_tv", "data": {"message": "x", "data": {"image": "/config/www/a.png", "file": "/config/www/b.png"}}}
+    assert find_policy_violations({"actions": [attach]}) == []
+
+
+def test_a_validated_templated_notification_icon_is_still_refused() -> None:
+    """The second walk in `_validate` reads Home Assistant's validated config, where a template is a `Template` object."""
+    from homeassistant.helpers import config_validation as cv  # noqa: PLC0415
+
+    tv = "notify.living_room_tv"
+    for data in ({"message": "x", "data": {"icon": "{{ p }}"}}, {"message": "x", "data": "{{ d }}"}):
+        validated = cv.SERVICE_SCHEMA({"action": tv, "data": data})
+        assert find_policy_violations({"actions": [validated]}), data
+    assert find_policy_violations({"actions": [cv.SERVICE_SCHEMA({"action": tv, "data": {"message": "{{ m }}", "data": {"icon": "mdi:bell"}}})]}) == []
