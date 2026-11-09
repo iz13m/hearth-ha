@@ -268,6 +268,9 @@ def _require_runnable(hass: HomeAssistant, params: dict[str, Any], expected_doma
 
 async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_domain: str) -> dict[str, Any]:
     entity_id = _require_runnable(hass, params, expected_domain)
+    # The entity id and nothing else (#787). AgDR-0005 lets a shared script run unchecked because it
+    # runs as the household wrote it; forwarding any of `params` as variables would let the caller fill
+    # in the household's templates (a notify `{{ msg }}`, a target), which #777 checks on every other path.
     try:
         async with asyncio.timeout(CALL_TIMEOUT_S):
             await hass.services.async_call(expected_domain, "turn_on", {"entity_id": entity_id}, blocking=True)

@@ -230,6 +230,40 @@ async def test_activate_scene_and_run_script(core: HomeAssistant) -> None:
     assert ei.value.code == "invalid_params"
 
 
+async def test_a_script_runs_with_no_inputs_whatever_the_call_carries(core: HomeAssistant, tmp_path: Path) -> None:
+    """
+    #787: an unlabelled household script runs unchecked (AgDR-0005) because it runs *as the household
+    wrote it*. A script that takes a field (`{{ msg }}`) into a notify service would be the model's
+    to fill in if `scripts.run` passed anything on, so it passes nothing: only the entity id reaches
+    `script.turn_on`, and extra keys in the request, under any name, are not forwarded as variables.
+    """
+    from pytest_homeassistant_custom_component.common import async_capture_events
+
+    (tmp_path / "scripts.yaml").write_text(
+        "announce:\n  alias: Announce\n  fields:\n    msg:\n      selector:\n        text: {}\n"
+        "  sequence:\n  - event: hearth_test_said\n    event_data:\n"
+        "      message: \"{{ msg | default('as the household wrote it') }}\"\n"
+    )
+    await core.services.async_call("script", "reload", blocking=True)
+    await core.async_block_till_done()
+    async_expose_entity(core, "conversation", "script.announce", True)
+    said = async_capture_events(core, "hearth_test_said")
+
+    d = build_dispatcher(core)
+    await d.dispatch(
+        "scripts.run",
+        {
+            "entity_id": "script.announce",
+            "variables": {"msg": "chosen by the model"},
+            "msg": "chosen by the model",
+            "data": {"msg": "chosen by the model"},
+            "fields": {"msg": "chosen by the model"},
+        },
+    )
+    await core.async_block_till_done()
+    assert [e.data["message"] for e in said] == ["as the household wrote it"]
+
+
 async def test_running_a_routine_requires_exposure(core: HomeAssistant) -> None:
     """
     Exposure gates activating a scene and running a script, exactly as it gates a direct service
