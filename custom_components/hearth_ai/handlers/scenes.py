@@ -19,6 +19,7 @@ from ..policy import _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
+from .inputs import find_input_reachable_violations, passes_inputs
 from .remotes import find_nested_remote_violations, find_remote_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, run_fields, visible
 from .resolve import resolve_registry_ids
@@ -302,7 +303,15 @@ def _script_raw_config(hass: HomeAssistant, entity_id: str) -> Any:
 
 def _script_targets(config: Any, path: str) -> list[tuple[str, str]]:
     """Every script a config starts, as (entity_id, path) pairs."""
-    out: list[tuple[str, str]] = []
+    return [(eid, p) for eid, p, _ in _script_calls(config, path)]
+
+
+def _script_calls(config: Any, path: str, *, nested: bool = False) -> list[tuple[str, str, bool]]:
+    """Every script a config starts, as (entity_id, path, whether the call hands it inputs) (#777).
+
+    `nested` for a household script's own calls, where only inputs holding a template count
+    (`passes_inputs`'s `templated_only`)."""
+    out: list[tuple[str, str, bool]] = []
     for node in _nodes(config):
         action = _fold(str(_service_name(node) or ""))
         if not action.startswith(f"{SCRIPT_DOMAIN_}."):
@@ -310,6 +319,7 @@ def _script_targets(config: Any, path: str) -> list[tuple[str, str]]:
         service = action.split(".", 1)[1]
         if service in _SCRIPT_NOT_STARTING:
             continue
+        inputs = passes_inputs(node, action, templated_only=nested)
         if service in ("turn_on", "toggle"):
             ids = [i for k in TARGET_BEARING_KEYS for i in _entity_ids(node.get(k))] + _entity_ids(node)
         else:
@@ -325,7 +335,7 @@ def _script_targets(config: Any, path: str) -> list[tuple[str, str]]:
             # `comp_entity_ids` is `Any(All(Lower, Any("all", "none")), entity_ids)`, so the
             # sentinel is **case-insensitive** — `ALL` folds to `all`, which is why this compares
             # the folded form rather than the literal.
-            out.append((_fold(eid), path))
+            out.append((_fold(eid), path, inputs))
     return out
 
 
@@ -354,15 +364,24 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
     as at the top level. That has a cost the top level does not: the started script is the owner's, so
     a registry id they wrote by hand into a service target, for an entity since deleted, now blocks
     every Hearth automation that starts that script. `main` allowed it.
+
+    **A call that hands the script inputs is asked one more question (#777).** `script.turn_on` with
+    `variables`, or `script.<id>` with `data`, fills in the household's templates, so the started
+    script may then hold a template only where an input cannot choose what it acts on, what it reads,
+    or which service it calls (`inputs.find_input_reachable_violations`, whose docstring lists the
+    guarded fields). A script it starts in turn is asked the same when that call passes inputs holding
+    a template, which could carry what the caller passed; one started with none, or with values the
+    household wrote literally, is not. Visited once per (script, inputs),
+    so a script first reached without inputs is still asked when it is reached with them.
     """
     problems: list[str] = []
-    checked: set[str] = set()
+    checked: set[tuple[str, bool]] = set()
     gates = _gates(hass)
 
-    async def visit(entity_id: str, path: str) -> None:
-        if entity_id in checked:  # a script that starts itself, or a diamond
+    async def visit(entity_id: str, path: str, inputs: bool) -> None:
+        if (entity_id, inputs) in checked:  # a script that starts itself, or a diamond
             return
-        checked.add(entity_id)
+        checked.add((entity_id, inputs))
         if entity_id in ("all", "none"):
             problems.append(f"{path}: starting a script by '{entity_id}' names every script in the house rather than one")
             return
@@ -404,11 +423,13 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         problems.extend(find_nested_remote_violations(raw, where))
         # Authoring: this walk only runs from `find_config_violations` (#713).
         problems.extend(await find_nested_scene_violations(hass, raw, authoring=True))
-        for nested, _ in _script_targets(raw, where):
-            await visit(nested, where)
+        if inputs:
+            problems.extend(find_input_reachable_violations(raw, where, entity_id))
+        for nested, _, passed in _script_calls(raw, where, nested=True):
+            await visit(nested, where, inputs and passed)
 
-    for entity_id, path in _script_targets(config, "config"):
-        await visit(entity_id, path)
+    for entity_id, path, passed in _script_calls(config, "config"):
+        await visit(entity_id, path, passed)
     return list(dict.fromkeys(problems))
 
 
