@@ -687,11 +687,20 @@ def _notify_icon_problems(carriers: list[Any]) -> list[str]:
 # NOTIFY_COMMAND_PREFIXES in policy.ts, whose comment says why: the companion app carries these out
 # rather than showing them. Every `notify.*` action, the `mobile_app` device action, `devices.call` and
 # `notify.send`; a templated message is refused when its literal lead could still become a command.
-NOTIFY_COMMAND_PREFIXES: tuple[str, ...] = ("command_", "request_location_update", "remove_channel", "clear_notification")
+# Android's and iOS's command words, one list (#812), as in policy.ts.
+NOTIFY_COMMAND_PREFIXES: tuple[str, ...] = (
+    "command_",
+    "request_location_update",
+    "remove_channel",
+    "clear_notification",
+    "update_complications",
+    "update_widgets",
+)
 NOTIFY_EXACT_COMMANDS: tuple[str, ...] = ("tts",)
 NOTIFY_COMMAND_RULE = (
     "a notification may not be a companion-app command (a message starting command_, request_location_update, "
-    "remove_channel or clear_notification, or one that is TTS), which a phone carries out rather than shows; start the message with literal words"
+    "remove_channel, clear_notification, update_complications or update_widgets, or one that is TTS), which a phone "
+    "carries out rather than shows; start the message with literal words"
 )
 
 

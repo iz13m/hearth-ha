@@ -13,6 +13,7 @@ from homeassistant.helpers.start import async_at_started
 
 from .claim import async_confirm, async_forget as async_forget_claim, async_pending_secret, async_save_pending, entry_claimed
 from .client import HearthClient
+from . import delivery
 from .const import CONF_CONFIRMED, CONF_INSTALL_SECRET, CONF_WS_URL, DOMAIN, ENTRY_TITLE, INTEGRATION_VERSION, LEGACY_ENTRY_TITLE
 from .labels import async_ensure_labels
 from .options import HearthOptions
@@ -52,6 +53,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HearthConfigEntry) -> bo
         hass.config_entries.async_update_entry(entry, title=ENTRY_TITLE)
     # Before the client: the first `entities.list` after connecting should already know the labels,
     # and the first `presentation.get` should not be the thing that reads the arrangement off disk.
+    # The delivery guard (#812), before anything can start a run: a notification sent during a run
+    # Hearth started may not carry a companion-app command. Removed on unload. If it cannot be
+    # installed, `delivery.active` says so and the paths that hand a script inputs fail closed.
+    delivery.async_install(hass)
+    entry.async_on_unload(lambda: delivery.async_remove(hass))
     await async_ensure_labels(hass)
     await async_load_profile(hass)
     # The sidebar is local and has nothing to do with the connection, so a home whose hub is down

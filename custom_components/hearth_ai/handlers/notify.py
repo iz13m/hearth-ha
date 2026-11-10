@@ -28,6 +28,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
+from ..delivery import hearth_context
 from ..policy import DENIED_ACTIONS, _fold, notify_message_problem
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
@@ -235,10 +236,10 @@ async def notify_send(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, 
     try:
         if row["kind"] == "entity":
             await hass.services.async_call(
-                DOMAIN_NOTIFY, "send_message", {**data, "entity_id": target}, blocking=True
+                DOMAIN_NOTIFY, "send_message", {**data, "entity_id": target}, blocking=True, context=hearth_context()
             )
         else:
-            await hass.services.async_call(DOMAIN_NOTIFY, name, data, blocking=True)
+            await hass.services.async_call(DOMAIN_NOTIFY, name, data, blocking=True, context=hearth_context())
     except HomeAssistantError as err:
         raise RpcError("ha_error", str(err) or "the notification could not be sent") from err
     return {"target": target, "sent": True}

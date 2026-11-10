@@ -19,7 +19,17 @@ from ..policy import raise_refusal, _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARI
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
-from .inputs import find_input_reachable_violations, passes_inputs
+from .. import delivery
+from .inputs import (
+    NOTIFIES,
+    NOTIFY_STEP_RULE,
+    UNREADABLE,
+    find_input_reachable_violations,
+    find_input_value_violations,
+    find_notify_word_violations,
+    notify_steps,
+    passes_inputs,
+)
 from .notify import find_notify_violations
 from .remotes import find_nested_remote_violations, find_remote_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, run_fields, visible
@@ -426,6 +436,9 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
     gates = _gates(hass)
     entrances = entrance_ids(hass)
 
+    def notifies(started: str) -> str | None:
+        return _chain_notifies(hass, started)
+
     async def visit(entity_id: str, path: str, inputs: bool) -> None:
         if (entity_id, inputs) in checked:  # a script that starts itself, or a diamond
             return
@@ -480,11 +493,75 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         problems.extend(await find_nested_scene_violations(hass, raw, authoring=True))
         if inputs:
             problems.extend(find_input_reachable_violations(raw, where, entity_id))
+            # #812: a notification's words built from inputs in a way the matcher cannot read through, and
+            # templated inputs this script hands on to one that notifies. Under Home Assistant's own
+            # context (an authored automation's run) the delivery guard does not look, so this must hold alone.
+            problems.extend(find_notify_word_violations(raw, where, entity_id))
+            problems.extend(find_input_value_violations(raw, where, notifies, household=True))
+            # Fail closed (#812): without the delivery guard nothing reads a notification's words when it
+            # is sent, so a script that sends one is not started with inputs at all.
+            if not delivery.active(hass):
+                problems.extend(f"{step}: {NOTIFY_STEP_RULE}" for step in notify_steps(raw, where))
         for nested, _, passed in _script_calls(raw, where, nested=True):
             await visit(nested, where, inputs and passed)
 
+    # Every input value to a script that notifies, by R4's matcher (#812): the household decides where it lands.
+    problems.extend(find_input_value_violations(config, "config", notifies))
     for entity_id, path, passed in _script_calls(config, "config"):
         await visit(entity_id, path, passed)
+    return list(dict.fromkeys(problems))
+
+
+def _chain_notifies(hass: HomeAssistant, entity_id: str, seen: set[str] | None = None) -> str | None:
+    """Whether a script started with inputs could put them into a notification (#812): `NOTIFIES` when it,
+    or a script it starts with templated inputs, has a notify step; `UNREADABLE` when what it does cannot
+    be read (strict, as the authoring walk is); None otherwise."""
+    seen = set() if seen is None else seen
+    if entity_id in seen:
+        return None
+    seen.add(entity_id)
+    if not entity_id.startswith(f"{SCRIPT_DOMAIN_}."):
+        return UNREADABLE
+    raw = _script_raw_config(hass, entity_id)
+    if not isinstance(raw, dict) or "use_blueprint" in raw:
+        return UNREADABLE
+    if notify_steps(raw, entity_id):
+        return NOTIFIES
+    for started, _, passed in _script_calls(raw, entity_id, nested=True):
+        if passed and (why := _chain_notifies(hass, started, seen)):
+            return why
+    return None
+
+
+async def unguarded_input_notify_violations(hass: HomeAssistant, entity_id: str) -> list[str]:
+    """Why a script Hearth is asked to run may not, while the delivery guard is not installed (#812).
+
+    The authoring walk above refuses a config that hands a notifying script inputs while the guard is
+    missing, but a script written while it stood still exists. So `scripts.run` and `devices.call` ask
+    the same at run time: does this script, or one it starts with inputs, hand inputs to a script that
+    sends a notification? Run-time rules otherwise (AgDR-0044): an unreadable script is not refused.
+    Empty, and nothing read, while the guard stands.
+    """
+    if delivery.active(hass):
+        return []
+    problems: list[str] = []
+    checked: set[tuple[str, bool]] = set()
+
+    def visit(script_id: str, inputs: bool, nested: bool) -> None:
+        if (script_id, inputs) in checked:
+            return
+        checked.add((script_id, inputs))
+        raw = _script_raw_config(hass, script_id)
+        if not isinstance(raw, dict):
+            return
+        if inputs:
+            problems.extend(f"{step}: {NOTIFY_STEP_RULE}" for step in notify_steps(raw, script_id))
+        # The script run directly may be one a model wrote, so any input it passes counts; one hop further,
+        # as in the authoring walk, only inputs holding a template carry the caller's.
+        for started, _, passed in _script_calls(raw, script_id, nested=nested):
+            visit(started, passed if not nested else inputs and passed, True)
+
+    visit(entity_id, False, False)
     return list(dict.fromkeys(problems))
 
 

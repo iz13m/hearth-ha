@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
+
+from custom_components.hearth_ai import delivery
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +26,7 @@ def auto_enable_custom_integrations(recorder_db_url, enable_custom_integrations)
 
 
 @pytest.fixture
-async def core(hass: HomeAssistant, tmp_path: Path) -> HomeAssistant:
+async def core(hass: HomeAssistant, tmp_path: Path) -> AsyncIterator[HomeAssistant]:
     """HA core with automation/scene/script set up against a default-shaped config dir."""
     hass.config.config_dir = str(tmp_path)
     (tmp_path / "configuration.yaml").write_text(
@@ -41,4 +44,8 @@ async def core(hass: HomeAssistant, tmp_path: Path) -> HomeAssistant:
     assert await async_setup_component(hass, "scene", {"scene": []})
     assert await async_setup_component(hass, "script", {"script": {}})
     await hass.async_block_till_done()
-    return hass
+    # As `async_setup_entry` does before any RPC can arrive (#812). Without it the paths that hand a
+    # script inputs fail closed, which `test_delivery_guard.py` asks for by removing it.
+    assert delivery.async_install(hass)
+    yield hass
+    delivery.async_remove(hass)

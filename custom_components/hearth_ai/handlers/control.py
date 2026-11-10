@@ -14,6 +14,7 @@ from homeassistant.core import Event, EventStateChangedData, HomeAssistant, call
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
+from ..delivery import hearth_context
 from ..labels import is_hearth_scene
 from ..policy import ENTRANCE_REFUSAL, TARGET_KEYS, raise_refusal, VALVE_DOMAIN, find_service_call_violations
 from ..rpc import Dispatcher, RpcError
@@ -22,7 +23,7 @@ from .entrances import entrance_ids
 from .notify import notify_call_violations
 from .remotes import remote_call_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
-from .scenes import scene_run_violations
+from .scenes import scene_run_violations, unguarded_input_notify_violations
 from .scripts import script_entrance_violations, script_run_violations
 from .vetted import vetted_call_violations
 from .water_heater import water_heater_call_violations
@@ -178,7 +179,7 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
             await _settled(
                 hass,
                 raw_ids,
-                hass.services.async_call(domain, service, {**data, "entity_id": raw_ids}, blocking=True),
+                hass.services.async_call(domain, service, {**data, "entity_id": raw_ids}, blocking=True, context=hearth_context()),
             )
     except TimeoutError as err:
         raise RpcError("timeout", f"{domain}.{service} did not finish within {CALL_TIMEOUT_S}s") from err
@@ -267,6 +268,9 @@ async def member_violations(
                 problems += [f"{entity_id}: this group holds {member}, which may not be run: {v}" for v in found]
             elif literal == "script" and (found := await script_entrance_violations(hass, member)):
                 problems += [f"{entity_id}: this group holds {member}, which may not be run: {v}" for v in found]
+            elif literal == "script" and (found := await unguarded_input_notify_violations(hass, member)):
+                # Without the delivery guard (#812), as `scripts.run` asks.
+                problems += [f"{entity_id}: this group holds {member}, which may not be run: {v}" for v in found]
     return list(dict.fromkeys(problems))
 
 
@@ -298,7 +302,8 @@ async def _run_entity(hass: HomeAssistant, params: dict[str, Any], expected_doma
     # in the household's templates (a notify `{{ msg }}`, a target), which #777 checks on every other path.
     try:
         async with asyncio.timeout(CALL_TIMEOUT_S):
-            await hass.services.async_call(expected_domain, "turn_on", {"entity_id": entity_id}, blocking=True)
+            # A context the delivery guard recognises (#812): the run keeps it, and so do the scripts it starts.
+            await hass.services.async_call(expected_domain, "turn_on", {"entity_id": entity_id}, blocking=True, context=hearth_context())
     except TimeoutError as err:
         raise RpcError("timeout", f"{entity_id} did not start within {CALL_TIMEOUT_S}s") from err
     return {"entity_id": entity_id, "state": _state_of(hass, entity_id)}
@@ -336,6 +341,9 @@ async def scripts_run(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, 
     # of a household script AgDR-0005's licence no longer covers.
     if violations := await script_entrance_violations(hass, entity_id):
         raise RpcError("method_not_allowed", "; ".join(violations), dict(ENTRANCE_REFUSAL))
+    # Fail closed without the delivery guard (#812): a script that hands a notifying script inputs.
+    if violations := await unguarded_input_notify_violations(hass, entity_id):
+        raise_refusal("method_not_allowed", violations)
     return await _run_entity(hass, params, "script")
 
 
