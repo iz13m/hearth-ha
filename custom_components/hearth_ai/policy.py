@@ -433,14 +433,19 @@ def raise_refusal(code: str, problems: list[str], prefix: str = "") -> NoReturn:
 
     Any other refusal wins: a scene that sets a lock is refused as that, in its words, whatever else it
     does. Only a refusal that is the entrance rule alone carries `ENTRANCE_REFUSAL`, which the app turns
-    into its own sentence in both languages.
+    into its own sentence in both languages; one that is R4's rule alone carries `UNVETTED_REFUSAL`.
     """
     from .rpc import RpcError  # noqa: PLC0415 - policy.py is imported by rpc.py
 
-    others = [p for p in problems if not is_entrance_problem(p)]
+    others = [p for p in problems if not is_entrance_problem(p) and not is_unvetted_problem(p)]
     if others:
         raise RpcError(code, prefix + "; ".join(others))
-    raise RpcError(code, prefix + "; ".join(problems), dict(ENTRANCE_REFUSAL))
+    # The not-yet-vetted rule (R4, AgDR-0076) is tagged the same way, when it is all there is.
+    if all(is_entrance_problem(p) for p in problems):
+        raise RpcError(code, prefix + "; ".join(problems), dict(ENTRANCE_REFUSAL))
+    if all(is_unvetted_problem(p) for p in problems):
+        raise RpcError(code, prefix + "; ".join(problems), dict(UNVETTED_REFUSAL))
+    raise RpcError(code, prefix + "; ".join(problems))
 # The refusal's `data`, so a surface that can show words (the app, the Managed tier) has both languages.
 ENTRANCE_REFUSAL: Mapping[str, str] = MappingProxyType({"refusal": "entrance", "message_en": ENTRANCE_RULE, "message_ar": ENTRANCE_RULE_AR})
 
@@ -678,6 +683,71 @@ def _notify_icon_problems(carriers: list[Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+# A notification is never a command to the phone (R4 security review, AgDR-0076). Mirror of
+# NOTIFY_COMMAND_PREFIXES in policy.ts, whose comment says why: the companion app carries these out
+# rather than showing them. Every `notify.*` action, the `mobile_app` device action, `devices.call` and
+# `notify.send`; a templated message is refused when its literal lead could still become a command.
+NOTIFY_COMMAND_PREFIXES: tuple[str, ...] = ("command_", "request_location_update", "remove_channel", "clear_notification")
+NOTIFY_EXACT_COMMANDS: tuple[str, ...] = ("tts",)
+NOTIFY_COMMAND_RULE = (
+    "a notification may not be a companion-app command (a message starting command_, request_location_update, "
+    "remove_channel or clear_notification, or one that is TTS), which a phone carries out rather than shows; start the message with literal words"
+)
+
+
+def _strip_message(text: str, *, lead: bool) -> str:
+    """`str.strip`'s set plus U+FEFF, until nothing changes. Mirror of NOTIFY_STRIP_LEAD and its trailing twin."""
+    while True:
+        stripped = (text.lstrip().lstrip("\ufeff") if lead else text.rstrip().rstrip("\ufeff"))
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def notify_message_problem(message: Any) -> str | None:
+    """Why a notification `message` could be a companion-app command, or None. Mirror of notifyMessageProblem."""
+    if message is None or isinstance(message, (bool, int, float)):
+        return None
+    # The second walk in `_validate` reads Home Assistant's validated config, where a message is a
+    # `Template` whether or not it is templated: its source is what it renders from.
+    source = getattr(message, "template", None)
+    if not isinstance(message, str) and isinstance(source, str):
+        message = source
+    if not isinstance(message, str):
+        return f"carries a message Hearth cannot read until it runs; {NOTIFY_COMMAND_RULE}"
+    match = _TEMPLATE_RE.search(message)
+    # U+FEFF too: JavaScript's `\s` strips it and `str.lstrip` does not.
+    lead = _fold(_strip_message(message if match is None else message[: match.start()], lead=True))
+    whole = _strip_message(lead, lead=False)
+    if match is None:
+        could = any(lead.startswith(c) for c in NOTIFY_COMMAND_PREFIXES) or whole in NOTIFY_EXACT_COMMANDS
+    else:
+        could = any(lead.startswith(c) or c.startswith(lead) for c in NOTIFY_COMMAND_PREFIXES) or any(c.startswith(whole) for c in NOTIFY_EXACT_COMMANDS)
+    return f"sends a message that could be a command to a phone; {NOTIFY_COMMAND_RULE}" if could else None
+
+
+def _notify_target_problems(target: Any) -> list[str]:
+    """A notify action's `target`, which Home Assistant merges into the data. Mirror of notifyTargetProblems."""
+    if target is None:
+        return []
+    if not isinstance(target, dict) or _has_templated_key(target):
+        return [f"carries a target Hearth cannot read until it runs, which could carry a message; {NOTIFY_COMMAND_RULE}"]
+    found: list[str] = []
+    for key in ("message", "title"):
+        if problem := notify_message_problem(target.get(key)):
+            found.append(f"target {key} {problem}")
+    return list(dict.fromkeys(found))
+
+
+def _notify_command_problems(carriers: list[Any]) -> list[str]:
+    """The same, for the `message` of each carrier of a `notify.*` action. Mirror of notifyCommandProblems."""
+    found: list[str] = []
+    for carrier in carriers:
+        if isinstance(carrier, dict) and (problem := notify_message_problem(carrier.get("message"))):
+            found.append(problem)
+    return list(dict.fromkeys(found))
+
+
 # A water heater's target is capped at 60 °C for safety (#560, AgDR-0075). Mirror of the
 # WATER_HEATER_DOMAIN block in policy.ts, whose comment says why, and a separate block on purpose.
 # Home Assistant's `set_temperature` takes any number and a scene sends its stored `temperature` the
@@ -784,6 +854,99 @@ def _scene_water_heater_problems(node: dict[str, Any]) -> list[str]:
     return problems
 
 
+# A model calls an integration's own services only once each one is vetted (R4 of the council's ruling
+# of 2026-11-09, #581, AgDR-0076). Mirror of ENTITY_SERVICE_DOMAINS and its neighbours in policy.ts,
+# which say why; `test_policy.py` pins these lists to `schema/methods.json` and the entity domains to
+# Home Assistant's own `Platform` enum. Which device a vetted service reaches is `handlers/vetted.py`.
+ENTITY_SERVICE_DOMAINS: frozenset[str] = frozenset(
+    {
+        # Home Assistant's entity platforms (2026.9.3), less the raw senders in UNVETTABLE_DOMAINS.
+        "ai_task", "air_quality", "alarm_control_panel", "assist_satellite", "binary_sensor", "button", "calendar", "camera",
+        "climate", "conversation", "cover", "date", "datetime", "device_tracker", "event", "fan", "geo_location", "humidifier",
+        "image", "image_processing", "lawn_mower", "light", "lock", "media_player", "notify", "number", "remote", "scene",
+        "select", "sensor", "siren", "stt", "switch", "text", "time", "todo", "tts", "update", "vacuum", "valve", "wake_word",
+        "water_heater", "weather",
+        # Home Assistant's own core and helper domains.
+        "homeassistant", "persistent_notification", "automation", "script", "group", "zone", "person", "counter", "timer",
+        "schedule", "input_boolean", "input_button", "input_datetime", "input_number", "input_select", "input_text",
+        # Home Assistant's own built-ins that act on their own data, not a device. Not `system_log`, not `alert`.
+        "logbook", "shopping_list",
+    }
+)
+VETTED_INTEGRATION_SERVICES: frozenset[str] = frozenset(
+    {
+        "alexa_devices.send_info_skill",
+        "alexa_devices.send_sound",
+        "frontend.set_theme",
+        "openai_conversation.generate_image",
+        "utility_meter.calibrate",
+        "utility_meter.reset",
+        "webostv.button",
+        "webostv.select_sound_output",
+    }
+)
+_MOBILE_APP_DOMAIN = "mobile_app"
+VETTED_DEVICE_ACTIONS: frozenset[str] = frozenset({"mobile_app.notify"})
+UNVETTABLE_SERVICES: frozenset[str] = frozenset({"mqtt.publish", "system_log.clear"})
+UNVETTABLE_DOMAINS: frozenset[str] = frozenset({"infrared", "radio_frequency", "rfxtrx", "rflink", "pilight"})
+UNVETTED_RULE = (
+    "Azka lets an assistant use an integration's own services only once each one has been checked, and this one has not been yet. "
+    "The home's owner can ask Azka to add it, or use it in Home Assistant"
+)
+UNVETTED_RULE_AR = (
+    "لا يسمح أذكى للمساعد باستخدام خدمات التكامل الخاصة إلا بعد التحقق من كل منها، ولم يُتحقق من هذه بعد. "
+    "يمكن لمالك المنزل أن يطلب من أذكى إضافتها، أو استخدامها من Home Assistant"
+)
+UNVETTED_REFUSAL: Mapping[str, str] = MappingProxyType({"refusal": "unvetted", "message_en": UNVETTED_RULE, "message_ar": UNVETTED_RULE_AR})
+_VETTED_TARGET_RULE = "Azka checks which device an integration's service reaches, so name the device or entity literally"
+# Keys an integration service addresses a device by, besides a target's `device_id`. Mirror of DEVICE_ADDRESS_KEYS.
+DEVICE_ADDRESS_KEYS: tuple[str, ...] = ("device_id", "node_id", "ieee")
+# Keys whose value is a list of triggers. Mirror of TRIGGER_KEYS.
+_TRIGGER_KEYS: frozenset[str] = frozenset({"triggers", "trigger", "wait_for_trigger"})
+
+
+def is_unvetted_problem(problem: str) -> bool:
+    """Whether a refusal is this rule's own. Mirror of isUnvettedProblem."""
+    return UNVETTED_RULE in problem
+
+
+def is_vetted_service(action: str) -> bool:
+    """Whether `action` is a standard entity-domain service, or a vetted integration one. Mirror of isVettedService."""
+    d = _domain(action)
+    if not d or d in UNVETTABLE_DOMAINS or _fold(action) in UNVETTABLE_SERVICES:
+        return False
+    return d in ENTITY_SERVICE_DOMAINS or _fold(action) in VETTED_INTEGRATION_SERVICES
+
+
+def _denied_by_name(action: str) -> bool:
+    """Already refused by name or domain, so "not yet vetted" would only repeat it. Mirror of deniedByName."""
+    return _domain(action) in DENIED_ACTION_DOMAINS or _fold(action) in DENIED_ACTIONS
+
+
+def _vetted_target_problems(node: dict[str, Any], action: str, what: str, p: str) -> list[str]:
+    """What a vetted integration service or device action may not select by. Mirror of vettedTargetProblems."""
+    problems: list[str] = []
+    keys, ids, unknowable = _target_selection(node, action)
+    for key in ("area_id", "floor_id", "label_id"):
+        if key in keys:
+            problems.append(f"{p}: {what} is an integration's own service and may not select by {key}; {_VETTED_TARGET_RULE}")
+    values: list[Any] = []
+    for src in (node, node.get("target"), node.get("data"), node.get("data_template")):
+        if not isinstance(src, dict):
+            continue
+        for key in DEVICE_ADDRESS_KEYS:
+            if key in src:
+                value = src[key]
+                values.extend(value if isinstance(value, list) else [value])
+
+    def templated(v: Any) -> bool:
+        return isinstance(v, str) and (bool(_TEMPLATE_RE.search(v)) or v.strip().lower() in ("all", "none"))
+
+    if unknowable or any(templated(i) for i in ids) or any(templated(v) for v in values):
+        problems.append(f"{p}: {what} is an integration's own service and what it reaches cannot be known before it runs; {_VETTED_TARGET_RULE}")
+    return problems
+
+
 # Domains handled by their own capability, so device control never implicitly grants the
 # ability to run user-authored sequences.
 ROUTINE_DOMAINS: frozenset[str] = frozenset({"scene", "script", "automation"})
@@ -821,6 +984,9 @@ def find_service_call_violations(
         problems.append(f"{full}: domain {raw_domain} can never be controlled")
     if folded in DENIED_ACTIONS:
         problems.append(f"{full}: not allowed")
+    # An integration's own service only once it is vetted (R4, AgDR-0076): see `ENTITY_SERVICE_DOMAINS`.
+    elif domain not in DENIED_ACTION_DOMAINS and not is_vetted_service(folded):
+        problems.append(f"{full}: not yet vetted; {UNVETTED_RULE}")
     if domain in ROUTINE_DOMAINS:
         problems.append(f"{full}: use activate_scene or run_script instead of calling the {raw_domain} domain directly")
     # Keyed on the service, not the ids: `valve.open_valve` reaches valves whatever it names (#527).
@@ -841,6 +1007,10 @@ def find_service_call_violations(
     # schema refuses most of what this reads, but the rule should not depend on that.
     if domain == _NOTIFY_DOMAIN:
         problems.extend(f"{full}: {problem}" for problem in _notify_icon_problems([data]))
+        # A companion-app command sent as a notification (AgDR-0076): see `NOTIFY_COMMAND_PREFIXES`.
+        # Not for a service denied by name, whose refusal already says it all.
+        if not _denied_by_name(folded):
+            problems.extend(f"{full}: {problem}" for problem in _notify_command_problems([data]))
     # Script variables (#765): see `_VARIABLES_RULE`.
     if isinstance(data, dict) and "variables" in data:
         problems.append(f"{full}: {_VARIABLES_RULE}")
@@ -1157,7 +1327,12 @@ def find_reference_violations(value: Any, path: str = "input") -> list[str]:
 
 
 def find_policy_violations(
-    config: Any, path: str = "config", *, registry_ids_resolved: bool = False, entrances: frozenset[str] = _NO_ENTRANCES
+    config: Any,
+    path: str = "config",
+    *,
+    registry_ids_resolved: bool = False,
+    entrances: frozenset[str] = _NO_ENTRANCES,
+    vet_services: bool = True,
 ) -> list[str]:
     """Human-readable violations for an automation or script config ([] = allowed). Mirror of `findPolicyViolations`.
 
@@ -1168,13 +1343,19 @@ def find_policy_violations(
     run, because HA's call raises on it and so reaches nothing (`scripts.script_run_violations`).
     Without it a registry id in a fan-out target is refused, as on the hub, which has no registry to
     resolve one against; that is the walk `POLICY_WALK_CASES` pins.
+
+    `vet_services=False` drops R4's rule (an integration's own service only once it is vetted,
+    AgDR-0076), and only a check of what the **household** wrote may pass it: a script one hop away
+    from an authored config, and a labelled script when it runs. Everything Hearth writes, and every
+    form value, keeps the default, which is the walk `POLICY_WALK_CASES` pins.
     """
     problems: list[str] = []
 
-    def visit(node: Any, p: str) -> None:
+    # `in_trigger`: under a key that holds triggers, where a device node reads rather than acts (R4).
+    def visit(node: Any, p: str, in_trigger: bool = False) -> None:
         if isinstance(node, list):
             for i, n in enumerate(node):
-                visit(n, f"{p}[{i}]")
+                visit(n, f"{p}[{i}]", in_trigger)
             return
         if not isinstance(node, dict):
             return
@@ -1189,6 +1370,14 @@ def find_policy_violations(
                 problems.append(f"{p}: action {action} targets denied domain {dom}")
             if _fold(action) in DENIED_ACTIONS:
                 problems.append(f"{p}: action {action} is not allowed")
+            # An integration's own service only once it is vetted (R4, AgDR-0076), and then only at a
+            # device the box can resolve.
+            # Not under a trigger key: a node there reads, so only a denial by name applies to it.
+            if vet_services and not in_trigger and dom and not _TEMPLATE_RE.search(action) and not _denied_by_name(action):
+                if not is_vetted_service(action):
+                    problems.append(f"{p}: action {action} is not yet vetted; {UNVETTED_RULE}")
+                elif dom not in ENTITY_SERVICE_DOMAINS:
+                    problems.extend(_vetted_target_problems(node, action, f"action {action}", p))
             ids = [i for k in TARGET_BEARING_KEYS for i in _entity_ids(node.get(k))] + _entity_ids(node) + _entity_ids({"entity_id": node.get("scene")})
             # A valve moves one way from here: closed (#527). The service decides, whatever it targets.
             if dom == VALVE_DOMAIN and not _valve_service_closes(action, _positions_of(node)):
@@ -1206,6 +1395,12 @@ def find_policy_violations(
             # A notification icon read from a file (#771): see `_NOTIFY_DOMAIN`.
             if dom == _NOTIFY_DOMAIN:
                 problems.extend(f"{p}: action {action} {problem}" for problem in _notify_icon_problems([node.get("data"), node.get("data_template")]))
+                # A companion-app command sent as a notification (AgDR-0076): see `NOTIFY_COMMAND_PREFIXES`.
+                # Like the vetting rule, only for what Hearth writes: a household script one hop away may take
+                # its message from an input (#777), and a labelled script is the household's own.
+                if vet_services and not _denied_by_name(action):
+                    problems.extend(f"{p}: action {action} {problem}" for problem in _notify_command_problems([node.get("data"), node.get("data_template")]))
+                    problems.extend(f"{p}: action {action} {problem}" for problem in _notify_target_problems(node.get("target")))
             for eid in ids:
                 if _domain(eid) == VALVE_DOMAIN and dom != VALVE_DOMAIN:
                     problems.append(f"{p}: action {action} aimed at {eid} could open a valve; {_VALVE_CLOSING_RULE}")
@@ -1243,10 +1438,36 @@ def find_policy_violations(
         # `DEVICE_ACTION_SERVICES` first (#662). RFXtrx's call no service, so they are refused by
         # name through `DENIED_DEVICE_ACTIONS` (#662).
         device_type = node.get("type")
+        # An integration's device action as R4 reads one (AgDR-0076). Mirror of integrationDeviceAction.
+        integration_device_action = (
+            vet_services
+            and not in_trigger
+            and "device_id" in node
+            and "condition" not in node
+            and isinstance(device_domain, str)
+            and _fold(device_domain) not in ENTITY_SERVICE_DOMAINS
+            and _fold(device_domain) not in DENIED_ENTITY_DOMAINS
+        )
+        # Without a `type` it names nothing that could be vetted.
+        if integration_device_action and not isinstance(device_type, str):
+            problems.append(f"{p}: device action {device_domain} has no type Azka can read, so it is not yet vetted; {UNVETTED_RULE}")
+        # The companion app's notify device action carries its message at the top level (AgDR-0076).
+        if integration_device_action and _fold(device_domain) == _MOBILE_APP_DOMAIN:
+            if problem := notify_message_problem(node.get("message")):
+                problems.append(f"{p}: device action {device_domain}.{device_type} {problem}")
+            problems.extend(f"{p}: device action {device_domain}.{device_type} {t}" for t in _notify_target_problems(node.get("target")))
         if isinstance(device_domain, str) and isinstance(device_type, str):
             named = f"{_fold(device_domain)}.{_fold(device_type)}"
             if DEVICE_ACTION_SERVICES.get(named, named) in DENIED_ACTIONS or named in DENIED_DEVICE_ACTIONS:
                 problems.append(f"{p}: device action {device_domain}.{device_type} is not allowed")
+            # An integration's device action only once it is vetted (R4, AgDR-0076). Only an action: a
+            # node under a trigger key is a trigger, and one with a `condition` key is a condition
+            # wherever it sits (`determine_script_action` takes `condition` before `device_id`).
+            elif integration_device_action:
+                if named not in VETTED_DEVICE_ACTIONS or _fold(device_domain) in UNVETTABLE_DOMAINS:
+                    problems.append(f"{p}: device action {device_domain}.{device_type} is not yet vetted; {UNVETTED_RULE}")
+                else:
+                    problems.extend(_vetted_target_problems(node, "", f"device action {device_domain}.{device_type}", p))
         # A valve device action may only close (#527). Not exempted for a trigger or condition key:
         # `determine_script_action` settles a node carrying two action keys by `ACTIONS_MAP` order.
         if isinstance(device_domain, str) and _fold(device_domain) == VALVE_DOMAIN and ("type" in node or "device_id" in node) and node.get("type") != "close":
@@ -1254,7 +1475,7 @@ def find_policy_violations(
         problems.extend(_entrance_device_problems(node, p, entrances))
         for k, v in node.items():
             if k in _LIST_KEYS or isinstance(v, (dict, list)):
-                visit(v, f"{p}.{k}")
+                visit(v, f"{p}.{k}", in_trigger or k in _TRIGGER_KEYS)
 
     visit(config, path)
     return list(dict.fromkeys(problems))

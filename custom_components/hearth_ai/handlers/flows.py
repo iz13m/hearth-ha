@@ -37,6 +37,7 @@ from .notify import find_notify_violations
 from .remotes import find_remote_violations
 from .resolve import resolve_registry_ids
 from .scenes import find_nested_authoring_violations
+from .vetted import find_vetted_target_violations
 from .water_heater import find_water_heater_violations
 from .registry import SWITCH_AS_X, _gates, _source_of, visible
 
@@ -527,6 +528,8 @@ async def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     problems += find_notify_violations(hass, config, "input")
     # A water heater's exact ceiling (#560), as for an automation.
     problems += find_water_heater_violations(hass, config, "input")
+    # Which device a vetted integration service reaches (R4, AgDR-0076), as for an automation.
+    problems += find_vetted_target_violations(hass, config, "input")
     # And what a scene or script the value activates would do (#721), asked exactly as it is of an
     # authored automation, over the resolved copy so a scene named by its registry id is read too.
     problems += await find_nested_authoring_violations(hass, config)

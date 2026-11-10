@@ -25,6 +25,7 @@ from .remotes import find_nested_remote_violations, find_remote_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, run_fields, visible
 from .resolve import resolve_registry_ids
 from .entrances import entrance_ids
+from .vetted import find_vetted_target_violations
 from .water_heater import find_water_heater_violations, group_water_heater_refusals, scene_water_heater_violations
 
 
@@ -291,6 +292,8 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
         + find_notify_violations(hass, config)
         # A water heater's exact ceiling, in the home's unit and against its own max_temp (#560).
         + find_water_heater_violations(hass, config)
+        # Which device a vetted integration service reaches (R4, AgDR-0076): box only.
+        + find_vetted_target_violations(hass, config)
         + await find_nested_authoring_violations(hass, config)
     )
 
@@ -459,7 +462,9 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         # learning the state, and the household wrote the condition themselves.
         # With the entrances (R3): an unattended automation starting a script that opens the garage is
         # a model opening it, one hop removed.
-        problems.extend(find_policy_violations(raw, where, registry_ids_resolved=True, entrances=entrances))
+        # Without R4's vetting rule (AgDR-0076): an integration service the household's own script calls
+        # is theirs, as the remote platform allowlist is left out here (#765).
+        problems.extend(find_policy_violations(raw, where, registry_ids_resolved=True, entrances=entrances, vet_services=False))
         # What it can do to a switch a `switch_as_x` gate covers, by the same line (#643): the ids it
         # moves and how it selects them, not every id it mentions.
         problems.extend(find_gate_violations(hass, raw, where, mode="nested", gates=gates))

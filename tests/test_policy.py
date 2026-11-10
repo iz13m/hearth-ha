@@ -24,9 +24,16 @@ from custom_components.hearth_ai.policy import (
     find_reference_violations,
     find_scene_policy_violations,
     find_service_call_violations,
+    is_unvetted_problem,
+    NOTIFY_COMMAND_RULE,
 )
 
 SCHEMA = Path(__file__).resolve().parents[2] / "shared" / "schema" / "methods.json"
+
+
+def _only_unvetted(problems: list[str]) -> bool:
+    """Refused, and only as not yet vetted (R4): nothing denies it by name."""
+    return len(problems) == 1 and is_unvetted_problem(problems[0])
 
 
 def test_lists_match_shared() -> None:
@@ -1015,10 +1022,11 @@ def test_every_path_writing_service_is_classified() -> None:
     ):
         assert find_policy_violations({"actions": [shape]}) != [], shape
 
-    # 5. ...and the ordinary services of those same integrations still work, so this stays
-    #    service-level rather than quietly becoming a domain ban.
+    # 5. ...and the ordinary services of those same integrations are not denied by name, so this stays
+    #    service-level rather than quietly becoming a domain ban. Since R4 they are refused as not yet
+    #    vetted, and only that (AgDR-0076).
     for allowed in ("homematicip_cloud.set_active_climate_profile", "telegram_bot.send_message"):
-        assert find_policy_violations({"actions": [{"action": allowed}]}) == [], allowed
+        assert _only_unvetted(find_policy_violations({"actions": [{"action": allowed}]})), allowed
 
     # 6. Buckets 3 and 4 are mutually exclusive and neither may re-classify something refused.
     assert not (set(GATED_BY_HA) & set(ON_A_REMOTE_FILESYSTEM))
@@ -1658,17 +1666,17 @@ def test_a_denied_device_action_is_refused_in_mixed_case() -> None:
     ]
 
 
-def test_a_zwave_device_action_that_is_not_a_denied_service_is_allowed() -> None:
-    # The controls: the check reads `domain.type` against the list, not the integration.
+def test_a_zwave_device_action_that_is_not_a_denied_service_is_not_denied_by_name() -> None:
+    # The controls: the check reads `domain.type` against the list, not the integration. Not yet vetted since R4.
     ping = {"device_id": "front_door_lock", "domain": "zwave_js", "type": "ping"}
-    assert find_policy_violations({"actions": [ping]}) == []
+    assert _only_unvetted(find_policy_violations({"actions": [ping]}))
     refresh = {
         "device_id": "front_door_lock",
         "domain": "zwave_js",
         "type": "refresh_value",
         "entity_id": _SIBLING,
     }
-    assert find_policy_violations({"actions": [refresh]}) == []
+    assert _only_unvetted(find_policy_violations({"actions": [refresh]}))
 
 
 # #662: a ZHA siren sounded by its IEEE address or its device, never naming the `siren.*` entity.
@@ -1712,11 +1720,11 @@ def test_each_device_action_service_is_denied() -> None:
         assert service in DENIED_ACTIONS
 
 
-def test_a_zha_device_action_that_is_not_a_warning_device_is_allowed() -> None:
-    # The controls: Inovelli's LED effects are the other ZHA device actions on 2026.9.3.
+def test_a_zha_device_action_that_is_not_a_warning_device_is_not_denied_by_name() -> None:
+    # The controls: Inovelli's LED effects are the other ZHA device actions on 2026.9.3. Not yet vetted since R4.
     led = {"device_id": "hall_switch", "domain": "zha", "effect_type": "Fast_Blink", "color": 200, "level": 100, "duration": 5}
-    assert find_policy_violations({"actions": [{**led, "type": "issue_all_led_effect"}]}) == []
-    assert find_policy_violations({"actions": [{**led, "type": "issue_individual_led_effect", "led_number": 1}]}) == []
+    assert _only_unvetted(find_policy_violations({"actions": [{**led, "type": "issue_all_led_effect"}]}))
+    assert _only_unvetted(find_policy_violations({"actions": [{**led, "type": "issue_individual_led_effect", "led_number": 1}]}))
 
 
 # #662: an RFXtrx siren sounded by a device action that calls a method on the device, not a service.
@@ -1809,10 +1817,11 @@ def test_the_raw_address_sweep_is_refused_on_authoring_and_control() -> None:
         assert find_service_call_violations(domain, name, ["binary_sensor.front_door_lock_door"], {}) == [f"{service}: not allowed"]
 
 
-def test_the_raw_address_sweep_spares_the_same_integrations_ordinary_services() -> None:
+def test_the_raw_address_sweep_does_not_deny_the_same_integrations_ordinary_services_by_name() -> None:
+    # Not yet vetted since R4 (AgDR-0076), and only that.
     for service in ("zha.reconfigure_device", "xiaomi_miio.remote_set_led_off", "isy994.send_node_command", "modbus.reload", "knx.read",
                     "elkm1.sensor_counter_refresh", "elkm1.speak_phrase", "lcn.var_reset", "insteon.print_all_link_database"):
-        assert find_policy_violations({"actions": [{"action": service, "target": {"device_id": "hall_switch"}}]}) == [], service
+        assert _only_unvetted(find_policy_violations({"actions": [{"action": service, "target": {"device_id": "hall_switch"}}]})), service
 
 
 _SIREN_REGISTRY_ID = "4f3c2b1a09e8d7c6b5a4938271605f4e"
@@ -1904,4 +1913,17 @@ def test_a_validated_templated_notification_icon_is_still_refused() -> None:
     for data in ({"message": "x", "data": {"icon": "{{ p }}"}}, {"message": "x", "data": "{{ d }}"}):
         validated = cv.SERVICE_SCHEMA({"action": tv, "data": data})
         assert find_policy_violations({"actions": [validated]}), data
-    assert find_policy_violations({"actions": [cv.SERVICE_SCHEMA({"action": tv, "data": {"message": "{{ m }}", "data": {"icon": "mdi:bell"}}})]}) == []
+    assert find_policy_violations({"actions": [cv.SERVICE_SCHEMA({"action": tv, "data": {"message": "TV: {{ m }}", "data": {"icon": "mdi:bell"}}})]}) == []
+
+
+def test_a_validated_notification_is_read_from_its_template_source() -> None:
+    """A validated message is a `Template` even when literal: the command rule reads its source (AgDR-0076)."""
+    from homeassistant.helpers import config_validation as cv  # noqa: PLC0415
+
+    def walk(message: str) -> list[str]:
+        return find_policy_violations({"actions": [cv.SERVICE_SCHEMA({"action": "notify.mobile_app_phone", "data": {"message": message}})]})
+
+    assert walk("Dinner is ready") == []
+    assert walk("Door: {{ states('binary_sensor.door') }}") == []
+    for message in ("command_dnd", "{{ states('input_text.note') }}", "Request_Location_Update"):
+        assert any(NOTIFY_COMMAND_RULE in p for p in walk(message)), message

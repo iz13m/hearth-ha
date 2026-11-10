@@ -24,6 +24,7 @@ from .remotes import remote_call_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
 from .scenes import scene_run_violations
 from .scripts import script_entrance_violations, script_run_violations
+from .vetted import vetted_call_violations
 from .water_heater import water_heater_call_violations
 
 # Service calls can legitimately take a while (thermostats, media players); scripts return
@@ -108,7 +109,8 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
         raise RpcError("invalid_params", "at most 50 entities per call")
 
     if violations := find_service_call_violations(domain, service, raw_ids, params.get("data")):
-        raise RpcError("method_not_allowed", "; ".join(violations))
+        # Tagged when it is R4's rule alone (`UNVETTED_REFUSAL`), so a surface can say it in both languages.
+        raise_refusal("method_not_allowed", violations)
 
     # HA's legacy notify schema takes no `entity_id`, so this call would fail anyway; refused in
     # Hearth's words regardless, as `find_service_call_violations` refuses the discovered name (#782).
@@ -154,6 +156,11 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
     # A remote command is sent or taught only to a remote whose integration plays stored names alone (#568, F1).
     # After `visible()`, so an id the model may not see is still refused as unknown rather than named.
     if problems := remote_call_violations(hass, domain, service, raw_ids, params.get("data")):
+        raise RpcError("method_not_allowed", "; ".join(problems))
+
+    # A vetted integration service never reaches a device that holds a lock, alarm panel, siren, camera,
+    # valve or entrance (R4, AgDR-0076). After `visible()`, as above.
+    if problems := vetted_call_violations(hass, domain, service, raw_ids, params.get("data")):
         raise RpcError("method_not_allowed", "; ".join(problems))
 
     # A water heater's exact ceiling, in the home's unit and against its own max_temp (#560). After

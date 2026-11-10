@@ -120,8 +120,8 @@ def _generic_script_starts(hass: HomeAssistant, config: Any) -> list[str]:
 
 def _entrance_only(config: Any, where: str, entrances: frozenset[str]) -> list[str]:
     """What the walk refuses about this config **because of the home's entrances**, and nothing else."""
-    without = set(find_policy_violations(config, where, registry_ids_resolved=True))
-    return [v for v in find_policy_violations(config, where, registry_ids_resolved=True, entrances=entrances) if v not in without]
+    without = set(find_policy_violations(config, where, registry_ids_resolved=True, vet_services=False))
+    return [v for v in find_policy_violations(config, where, registry_ids_resolved=True, entrances=entrances, vet_services=False) if v not in without]
 
 
 async def script_entrance_violations(hass: HomeAssistant, entity_id: str, entrances: frozenset[str] | None = None) -> list[str]:
@@ -353,7 +353,9 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str, data: Any =
     # Resolved above, and an id that did not resolve is allowed at run time, so the walker is told (#663).
     # With the entrances (R3, AgDR-0074): a scene with steps may close one and never open one.
     entrances = entrance_ids(hass) if entrances is None else entrances
-    problems = find_policy_violations(config, registry_ids_resolved=True, entrances=entrances) + find_reference_violations(config, "config")
+    # Without R4's vetting rule (AgDR-0076): it applies to what Hearth writes, and a labelled script
+    # is checked when it runs for what it may not touch, not for which integration it calls.
+    problems = find_policy_violations(config, registry_ids_resolved=True, entrances=entrances, vet_services=False) + find_reference_violations(config, "config")
     # Literal, the two above: a switch a `switch_as_x` helper presents as a lock, siren or valve, or a
     # group over one, is just a switch to them (#643). Every id-shaped string counts, a condition's
     # included: this is a scene, and a scene is refused for what it touches.

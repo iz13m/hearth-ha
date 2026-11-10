@@ -362,7 +362,8 @@ def test_each_guarded_field_is_caught(action: dict[str, Any]) -> None:
 @pytest.mark.parametrize(
     "action",
     [
-        {"action": "notify.tv", "data": {"message": "{{ m }}", "title": "{{ t }}", "data": {"icon": "/local/tv.png"}}},
+        # Words first: a message that is all template could be a companion-app command (AgDR-0076).
+        {"action": "notify.tv", "data": {"message": "TV: {{ m }}", "title": "{{ t }}", "data": {"icon": "/local/tv.png"}}},
         {"action": "climate.set_temperature", "target": {"entity_id": "climate.hall"}, "data": {"temperature": "{{ t }}"}},
         {"action": "light.turn_on", "target": {"entity_id": "light.hall"}, "data": {"brightness_pct": "{{ b }}"}},
         {"action": "cover.set_cover_position", "target": {"entity_id": "cover.blind"}, "data": {"position": "{{ p }}"}},

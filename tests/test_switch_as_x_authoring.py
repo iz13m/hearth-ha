@@ -116,7 +116,9 @@ async def test_a_lock_relay_by_registry_id_is_refused(core: HomeAssistant, kind:
 async def test_a_device_action_on_a_gated_relay_is_refused(core: HomeAssistant, kind: str) -> None:
     """Ruling 10's device-action form: no `action` key, the relay named by registry id. A valve's relay
     is the row that needs the device-action branch, since a lock's is also refused for being named.
-    Control: the same device action on a plain switch on the same device passes the policy walk."""
+    Since R4's review (AgDR-0076) a device action at a device that holds a lock is refused whatever
+    entity it names, so a plain switch on the same device is refused too, and by that rule alone.
+    Control: the same device action on a plain switch on a device of its own passes the policy walk."""
     entry = MockConfigEntry(domain="hearth_test")
     entry.add_to_hass(core)
     device = dr.async_get(core).async_get_or_create(config_entry_id=entry.entry_id, identifiers={("hearth_test", "box")})
@@ -132,10 +134,16 @@ async def test_a_device_action_on_a_gated_relay_is_refused(core: HomeAssistant, 
     def action(entity_id: str) -> dict[str, Any]:
         return {"device_id": device.id, "domain": "switch", "type": "turn_off", "entity_id": reg.async_get(entity_id).id}
 
-    assert _refused(await _validate(core, kind, action(relay))) == GATED_NAMED
+    reached = "reaches a device that has a lock, alarm panel, siren, camera, valve or entrance"
+    error = _refused(await _validate(core, kind, action(relay)))
+    assert error.startswith(GATED_NAMED) and reached in error, error
     error = _refused(await _validate(core, kind, action(tap)))
     assert tap in error and "valve" in error, error
-    res = await _validate(core, kind, action(lamp))
+    error = _refused(await _validate(core, kind, action(lamp)))
+    assert reached in error and GATED_NAMED not in error, error
+    own = dr.async_get(core).async_get_or_create(config_entry_id=entry.entry_id, identifiers={("hearth_test", "lamp_box")})
+    reg.async_update_entity(lamp, device_id=own.id)
+    res = await _validate(core, kind, {"device_id": own.id, "domain": "switch", "type": "turn_off", "entity_id": reg.async_get(lamp).id})
     assert res.get("status") != "policy", res
 
 

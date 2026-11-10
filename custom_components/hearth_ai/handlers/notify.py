@@ -28,7 +28,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ..policy import DENIED_ACTIONS, _fold
+from ..policy import DENIED_ACTIONS, _fold, notify_message_problem
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .remotes import _visit_services
@@ -211,6 +211,10 @@ async def notify_send(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, 
     message = require_str(params, "message")
     if not message.strip() or len(message) > MAX_MESSAGE:
         raise RpcError("invalid_params", f"message must be 1..{MAX_MESSAGE} characters")
+    # A companion-app command, which a phone carries out rather than shows (AgDR-0076). Home Assistant
+    # renders the message as a template, so it is read the way the walkers read one.
+    if problem := notify_message_problem(message):
+        raise RpcError("method_not_allowed", f"message {problem}")
     title = params.get("title")
     if title is not None and (not isinstance(title, str) or len(title) > MAX_TITLE):
         raise RpcError("invalid_params", f"title must be a string of at most {MAX_TITLE} characters")
