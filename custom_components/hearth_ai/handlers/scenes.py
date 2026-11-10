@@ -15,7 +15,7 @@ from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from ..policy import _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_DOMAIN, _domain, _entity_ids, _fold, _service_name, _valve_state_closes, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations, find_scene_write_violations
+from ..policy import raise_refusal, _GROUP_DOMAIN, ROUTINE_DOMAINS, TARGET_BEARING_KEYS, VALVE_DOMAIN, _domain, _entity_ids, _fold, _service_name, _valve_state_closes, DENIED_ENTITY_DOMAINS, find_policy_violations, find_reference_violations, find_scene_policy_violations, find_scene_write_violations
 from ..rpc import Dispatcher, RpcError
 from .common import lock_for, plain, read_yaml, require_config, require_str, write_yaml
 from .gated import find_gate_violations
@@ -24,6 +24,7 @@ from .notify import find_notify_violations
 from .remotes import find_nested_remote_violations, find_remote_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _gates, _off_limits_id, expand_members, run_fields, visible
 from .resolve import resolve_registry_ids
+from .entrances import entrance_ids
 from .water_heater import find_water_heater_violations, group_water_heater_refusals, scene_water_heater_violations
 
 
@@ -38,13 +39,16 @@ def _entity_id(hass: HomeAssistant, key: str) -> str | None:
 def _validate(hass: HomeAssistant, config: dict[str, Any]) -> None:
     # Plus, at write only, no automation, script or scene key (#713): `find_scene_policy_violations`
     # alone is also the run-time check, which must keep running the household's own scenes.
-    violations = find_scene_policy_violations(config) + find_scene_write_violations(config) + find_reference_violations(config, "config")
+    # An entrance may be set only shut (R3, AgDR-0074): only this side knows which ids are entrances.
+    violations = (
+        find_scene_policy_violations(config, entrance_ids(hass)) + find_scene_write_violations(config) + find_reference_violations(config, "config")
+    )
     # A switch a `switch_as_x` helper presents as a lock, siren or valve is a switch to the two above (#643).
     violations += find_gate_violations(hass, config, mode="scene")
     # A water heater's exact ceiling, in the home's unit (#560): the two above refuse only what is over in any unit.
     violations += scene_water_heater_violations(hass, config.get("entities"))
     if violations:
-        raise RpcError("validation_failed", "policy: " + "; ".join(violations))
+        raise_refusal("validation_failed", violations, "policy: ")
     try:
         SCENE_PLATFORM_SCHEMA(config)
     except vol.Invalid as err:
@@ -113,7 +117,9 @@ def gated_refusals(gates: GateMap, entity_ids: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(problems))
 
 
-def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[str, Any] | None, gates: GateMap | None = None) -> list[str]:
+def find_scene_run_violations(
+    hass: HomeAssistant, entity_id: str, config: dict[str, Any] | None, gates: GateMap | None = None, entrances: frozenset[str] | None = None
+) -> list[str]:
     """
     Why a scene may not be activated. Empty means it may.
 
@@ -144,8 +150,18 @@ def find_scene_run_violations(hass: HomeAssistant, entity_id: str, config: dict[
             for eid in members
             if eid.split(".", 1)[0].lower() == VALVE_DOMAIN
         ]
+    # An entrance only closes (R3, AgDR-0074), when a scene runs as much as when one is written: a
+    # model activating the household's "Arrive home" must not be how the garage opens. Without
+    # scenes.yaml the attribute names the entrance but not its state, so that is refused, as a valve is.
+    entrances = entrance_ids(hass) if entrances is None else entrances
+    if not config:
+        problems += [
+            f"{eid}: this scene sets an entrance and Hearth cannot read which way, so it cannot be activated"
+            for eid in members
+            if eid.lower() in entrances
+        ]
     if config:
-        problems += find_scene_policy_violations(config)
+        problems += find_scene_policy_violations(config, entrances)
         # A water heater's exact ceiling (#560), a household's own scene included: the council reversed
         # #557's grandfathering for the run path.
         problems += scene_water_heater_violations(hass, config.get("entities"))
@@ -261,7 +277,10 @@ async def find_config_violations(hass: HomeAssistant, config: Any) -> list[str]:
     return (
         unresolved
         # Resolved, and the resolver has refused what did not resolve, so the walker is told (#663).
-        + find_policy_violations(config, registry_ids_resolved=True)
+        # With the home's entrances, which only this side knows (R3, AgDR-0074): an authored config
+        # may close one and never open one, after a delay, in a scene's states or by a target it
+        # cannot name before it runs.
+        + find_policy_violations(config, registry_ids_resolved=True, entrances=entrance_ids(hass))
         + find_reference_violations(config, "config")
         # The two above are literal: a switch a `switch_as_x` helper presents as a lock, siren or valve
         # is a switch to them (#643). After registry ids are resolved, so a UUID is checked too.
@@ -402,6 +421,7 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
     problems: list[str] = []
     checked: set[tuple[str, bool]] = set()
     gates = _gates(hass)
+    entrances = entrance_ids(hass)
 
     async def visit(entity_id: str, path: str, inputs: bool) -> None:
         if (entity_id, inputs) in checked:  # a script that starts itself, or a diamond
@@ -437,7 +457,9 @@ async def find_nested_script_violations(hass: HomeAssistant, config: Any) -> lis
         # notification, and took every Hearth automation that calls that script with it. Reading
         # whether a lock is locked is not reaching a lock: `HIDDEN_DOMAINS` already stops the model
         # learning the state, and the household wrote the condition themselves.
-        problems.extend(find_policy_violations(raw, where, registry_ids_resolved=True))
+        # With the entrances (R3): an unattended automation starting a script that opens the garage is
+        # a model opening it, one hop removed.
+        problems.extend(find_policy_violations(raw, where, registry_ids_resolved=True, entrances=entrances))
         # What it can do to a switch a `switch_as_x` gate covers, by the same line (#643): the ids it
         # moves and how it selects them, not every id it mentions.
         problems.extend(find_gate_violations(hass, raw, where, mode="nested", gates=gates))
@@ -541,6 +563,7 @@ async def scenes_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
     by_id = {str(i.get(CONF_ID)): plain(i) for i in data if isinstance(i, dict) and i.get(CONF_ID)}
     out = []
     gates = _gates(hass)
+    entrances = entrance_ids(hass)
     ent_reg = er.async_get(hass)
     for state in sorted(hass.states.async_all(SCENE_DOMAIN), key=lambda s: s.entity_id):
         scene_id = state.attributes.get("id")
@@ -550,7 +573,7 @@ async def scenes_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[
         # and editable, but not runnable, even when exposed.
         ent = ent_reg.async_get(state.entity_id)
         shown = visible(hass, state.entity_id, ent, gates)
-        refused = shown and bool(find_scene_run_violations(hass, state.entity_id, by_id.get(str(scene_id)) if scene_id else None, gates))
+        refused = shown and bool(find_scene_run_violations(hass, state.entity_id, by_id.get(str(scene_id)) if scene_id else None, gates, entrances))
         out.append(
             {
                 "id": str(scene_id) if scene_id else state.entity_id,

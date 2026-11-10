@@ -39,7 +39,7 @@ def test_the_walkers_agree_on_every_stored_scene_case() -> None:
     assert len(cases) >= 20, "run pnpm --filter @hearth/shared export:jsonschema first"
     assert any(c["write_violations"] and not c["run_violations"] for c in cases), "the corpus must pin a write-only refusal"
     for case in cases:
-        assert find_scene_policy_violations(case["config"]) == case["run_violations"], case["name"]
+        assert find_scene_policy_violations(case["config"], frozenset(case.get("entrances") or ())) == case["run_violations"], case["name"]
         assert find_scene_write_violations(case["config"]) == case["write_violations"], case["name"]
 
 

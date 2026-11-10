@@ -48,7 +48,18 @@ owner may also put this label on a script they wrote themselves, which is the wh
 ordinary Home Assistant label rather than a flag in Hearth's own storage.
 """
 
-ALL_LABELS: dict[str, str] = {**ROLES, **ROUTINE_ROLES}
+SAFETY_ROLES: dict[str, str] = {"entrance": "Hearth: entrance"}
+"""Labels that narrow what an assistant may do with an entity, never how it is presented.
+
+`Hearth: entrance` marks anything as an entrance no assistant may open, voice included (R3 of the
+council's ruling of 2026-11-09, AgDR-0074): a relay wired to a garage, a light that drives a gate.
+It counts on the entity **and on its own device** (`is_entrance_labelled`), because it only takes
+something away, so putting it on too much costs a refusal and leaving it off costs the door. Not in
+`ROLES` for the reason `Hearth: scene` is not: `roles_of` feeds `hearth_labels`, which the hub
+resolves into a placement, and this has none, so `HEARTH_ROLES` stays five.
+"""
+
+ALL_LABELS: dict[str, str] = {**ROLES, **ROUTINE_ROLES, **SAFETY_ROLES}
 
 DESCRIPTIONS: dict[str, str] = {
     "tile": "Azka app: show this as its own tile. A setting stays an admin's to change.",
@@ -57,6 +68,10 @@ DESCRIPTIONS: dict[str, str] = {
     "diagnostic": "Azka app: treat this as a reading about its device, never changed from the app.",
     "hide": "Azka app: do not show this in the app. Assistants still see what Assist shares.",
     "scene": "Azka app: show this script in Scenes. A scene with steps or a schedule is a script.",
+    "entrance": "Azka: an entrance. No assistant or voice command may open it; closing is allowed. "
+    "If a YAML template or automation drives it through a relay, label the relay too. "
+    "أذكى: مدخل. لا يفتحه أي مساعد أو أمر صوتي، والإغلاق مسموح. "
+    "إذا كان قالب YAML أو أتمتة يشغّله عبر مرحّل، فضع التسمية على المرحّل أيضًا.",
 }
 ICON = "mdi:home-heart"
 
@@ -176,6 +191,25 @@ def is_hearth_scene(hass: HomeAssistant, entity_id: str) -> bool:
     return bool(entry and label_id in (entry.labels or set()))
 
 
+@callback
+def is_entrance_labelled(hass: HomeAssistant, ent: Any, dev_reg: dr.DeviceRegistry | None = None) -> bool:
+    """Whether `Hearth: entrance` is on this registry entry or on **its own** device (AgDR-0074).
+
+    Read by stored id and by exact name, as every Hearth label is, so a label the owner made by hand
+    counts. A parent device's labels are not read, as `hearth_labels` does not read them.
+    """
+    label_id = label_id_for(hass, "entrance")
+    if not label_id or ent is None:
+        return False
+    if label_id in (getattr(ent, "labels", None) or set()):
+        return True
+    device_id = getattr(ent, "device_id", None)
+    if not device_id:
+        return False
+    dev = (dev_reg or dr.async_get(hass)).async_get(device_id)
+    return bool(dev is not None and label_id in (dev.labels or set()))
+
+
 async def async_mark_hearth_scene(hass: HomeAssistant, entity_id: str, wanted: bool) -> None:
     """Put `Hearth: scene` on a routine, or take it off. Silent when the label does not exist yet.
 
@@ -218,6 +252,11 @@ def hearth_labels(hass: HomeAssistant, ent: Any, dev_reg: dr.DeviceRegistry | No
     return {"entity": entity, "device": device}
 
 
+_ENTRANCE_FIELDS = frozenset({"device_class", "original_device_class", "name", "original_name"})
+# Mirror of `handlers/entrances.NAMED_DOMAINS`, which imports this module and so cannot be imported here.
+_ENTRANCE_NAMED_DOMAINS = frozenset({"switch", "cover", "button", "input_button"})
+
+
 class RegistryWatcher:
     """Tells the hub when a Hearth label changed, so the app follows within a second or two.
 
@@ -257,13 +296,23 @@ class RegistryWatcher:
     def _touches(self, label_ids: Iterable[str]) -> bool:
         # Any Hearth label, presentation or routine: a script gaining `Hearth: scene` changes what
         # the Scenes tab holds, which the app should see as soon as a presentation change.
-        routine_ids = {label_id_for(self._hass, role) for role in ROUTINE_ROLES}
+        # And `Hearth: entrance` (AgDR-0074): adding it must reach the hub's voice model within the
+        # debounce, not on the next timed refresh, or the open it refuses stays allowed until then.
+        routine_ids = {label_id_for(self._hass, role) for role in (*ROUTINE_ROLES, *SAFETY_ROLES)}
         return any(role_of(self._hass, label_id) or label_id in routine_ids for label_id in label_ids)
 
     @callback
     def _on_entity(self, event: Event[Any]) -> None:
         data = event.data
-        if data.get("action") != "update" or "labels" not in data.get("changes", {}):
+        if data.get("action") != "update":
+            return
+        changes = data.get("changes", {})
+        # What decides an entrance besides the label (AgDR-0074): a cover's class, and the name the rule
+        # reads on a relay, a cover or a button. A rename or a reclassification reaches voice at once.
+        if _ENTRANCE_FIELDS.intersection(changes) and str(data.get("entity_id", "")).split(".", 1)[0] in _ENTRANCE_NAMED_DOMAINS:
+            self._schedule()
+            return
+        if "labels" not in changes:
             return
         ent = er.async_get(self._hass).async_get(data["entity_id"])
         now = ent.labels if ent is not None else set()
@@ -273,7 +322,13 @@ class RegistryWatcher:
     @callback
     def _on_device(self, event: Event[Any]) -> None:
         data = event.data
-        if data.get("action") != "update" or "labels" not in data.get("changes", {}):
+        if data.get("action") != "update":
+            return
+        # A device's name is part of its entities' names, which the entrance name rule reads (AgDR-0074).
+        if {"name_by_user", "name"}.intersection(data.get("changes", {})):
+            self._schedule()
+            return
+        if "labels" not in data.get("changes", {}):
             return
         dev = dr.async_get(self._hass).async_get(data["device_id"])
         now = dev.labels if dev is not None else set()

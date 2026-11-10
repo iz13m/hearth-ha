@@ -10,7 +10,7 @@ import math
 import re
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import unquote
 
 DENIED_ACTION_DOMAINS: frozenset[str] = frozenset(
@@ -390,6 +390,153 @@ def _positions_of(node: dict[str, Any]) -> list[Any] | None:
             out.append(value["position"])
     return out
 
+# **No assistant opens an entrance; closing one is allowed** (R3, #616, #608, #613; AgDR-0074). Mirror of
+# the entrance rule in policy.ts, whose comment says what an entrance is and why the rule is #527's valve
+# rule applied per entity. Only the box knows which ids are entrances (`handlers/entrances.py`), so every
+# walker here takes the set and treats a missing one as "no entrances", which is what the hub walks with.
+ENTRANCE_COVER_CLASSES: frozenset[str] = frozenset({"garage", "gate", "door"})
+ENTRANCE_LABEL = "Hearth: entrance"
+ENTRANCE_RULE = (
+    "Azka never lets an assistant open an entrance (a garage, gate or door, or anything labelled Hearth: entrance); "
+    "it may close one. Open it yourself in the Home Assistant app"
+)
+ENTRANCE_RULE_AR = (
+    "لا يسمح أذكى لأي مساعد بفتح مدخل (باب كراج أو بوابة أو باب، أو أي شيء يحمل التسمية Hearth: entrance)، "
+    "ويمكنه إغلاقه. افتحه بنفسك من تطبيق Home Assistant"
+)
+# Per entity domain: the services that only close, and the position service that closes at a literal 0.
+_ENTRANCE_CLOSING: Mapping[str, tuple[tuple[str, ...], str | None]] = MappingProxyType(
+    {"cover": (("close_cover",), "set_cover_position"), "valve": (("close_valve",), "set_valve_position")}
+)
+_ENTRANCE_CLOSING_DEFAULT: tuple[tuple[str, ...], str | None] = (("turn_off",), None)
+_ENTRANCE_CLOSING_DEVICE_TYPES: Mapping[str, str] = MappingProxyType({"cover": "close", "valve": "close"})
+# Device trigger and condition types, which read rather than move. Mirror of ENTRANCE_READ_DEVICE_TYPES.
+_ENTRANCE_READ_DEVICE_TYPES: frozenset[str] = frozenset(
+    {
+        "opened", "closed", "opening", "closing", "position", "tilt_position",
+        "is_open", "is_closed", "is_opening", "is_closing", "is_position", "is_tilt_position",
+        "turned_on", "turned_off", "changed_states", "is_on", "is_off",
+    }
+)
+_NO_ENTRANCES: frozenset[str] = frozenset()
+# `script.*` services that do not start the script they are named after. Mirror of SCRIPT_NOT_STARTING.
+_SCRIPT_NOT_STARTING: frozenset[str] = frozenset({"turn_on", "turn_off", "toggle", "reload"})
+
+
+def is_entrance_problem(problem: str) -> bool:
+    """Whether a refusal is the entrance rule's own: every one of its sentences carries one of these."""
+    return ENTRANCE_RULE in problem or "with an entrance" in problem or "sets an entrance" in problem
+
+
+def raise_refusal(code: str, problems: list[str], prefix: str = "") -> NoReturn:
+    """Raise `problems` as one `RpcError`, tagged an entrance refusal when that is all they are (code review of e55c05e).
+
+    Any other refusal wins: a scene that sets a lock is refused as that, in its words, whatever else it
+    does. Only a refusal that is the entrance rule alone carries `ENTRANCE_REFUSAL`, which the app turns
+    into its own sentence in both languages.
+    """
+    from .rpc import RpcError  # noqa: PLC0415 - policy.py is imported by rpc.py
+
+    others = [p for p in problems if not is_entrance_problem(p)]
+    if others:
+        raise RpcError(code, prefix + "; ".join(others))
+    raise RpcError(code, prefix + "; ".join(problems), dict(ENTRANCE_REFUSAL))
+# The refusal's `data`, so a surface that can show words (the app, the Managed tier) has both languages.
+ENTRANCE_REFUSAL: Mapping[str, str] = MappingProxyType({"refusal": "entrance", "message_en": ENTRANCE_RULE, "message_ar": ENTRANCE_RULE_AR})
+
+
+def _entrance_id(value: Any) -> str:
+    """Lower-cased, as Home Assistant reads an id. Mirror of entranceIdOf."""
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def entrance_service_closes(action: str, entity_id: str, positions: list[Any] | None) -> bool:
+    """Whether a call to `action` on an entrance can only close it. Mirror of entranceServiceCloses."""
+    ed = _domain(entity_id)
+    if not ed or _domain(action) != ed:
+        return False
+    service = _fold(action)[len(ed) + 1 :]
+    close, position = _ENTRANCE_CLOSING.get(ed, _ENTRANCE_CLOSING_DEFAULT)
+    if service in close:
+        return True
+    return position is not None and service == position and positions is not None and len(positions) > 0 and all(_is_literal_zero(p) for p in positions)
+
+
+def entrance_state_closes(entity_id: str, value: Any) -> bool:
+    """A scene's stored state for an entrance that can only leave it shut. Mirror of entranceStateCloses."""
+    shut = "closed" if (_domain(entity_id) or "") in _ENTRANCE_CLOSING else "off"
+    if isinstance(value, str) and value == shut:
+        return True
+    if not isinstance(value, dict):
+        return False
+    return value.get("state") == shut and all(k == "current_position" and _is_literal_zero(v) for k, v in value.items() if k != "state")
+
+
+def _scene_entrance_ids(node: dict[str, Any], entrances: frozenset[str]) -> list[str]:
+    """Every entrance a scene service sets to something other than shut, or snapshots. Mirror of sceneEntranceIds."""
+    out: list[str] = []
+    for src in (node, node.get("data"), node.get("data_template")):
+        if not isinstance(src, dict):
+            continue
+        entities = src.get("entities")
+        if isinstance(entities, dict):
+            out.extend(str(k) for k, v in entities.items() if _entrance_id(k) in entrances and not entrance_state_closes(str(k), v))
+        else:
+            out.extend(x for x in (entities if isinstance(entities, list) else [entities]) if _entrance_id(x) in entrances)
+        out.extend(x for x in _entity_ids({"entity_id": src.get("snapshot_entities")}) if _entrance_id(x) in entrances)
+    return out
+
+
+def _entrance_domains(entrances: frozenset[str]) -> set[str]:
+    return {d for e in entrances if (d := _domain(e))}
+
+
+def _entrance_action_problems(node: dict[str, Any], action: str, ids: list[str], p: str, entrances: frozenset[str]) -> list[str]:
+    """The entrance half of the action branch. Mirror of entranceActionProblems."""
+    if not entrances:
+        return []
+    problems: list[str] = []
+    positions = _positions_of(node)
+    # The per-script service `script.<id>` starts that script: checked as an id of its own. Mirror of policy.ts.
+    starts_itself = _domain(action) == "script" and _fold(action)[len("script.") :] not in _SCRIPT_NOT_STARTING
+    for eid in [*ids, _fold(action)] if starts_itself else ids:
+        if _entrance_id(eid) in entrances and not entrance_service_closes(action, eid, positions):
+            problems.append(f"{p}: action {action} could open {eid}; {ENTRANCE_RULE}")
+    dom = _domain(action)
+    if dom == "scene":
+        problems.extend(f"{p}: action {action} could leave {eid} open; {ENTRANCE_RULE}" for eid in _scene_entrance_ids(node, entrances))
+    # Or a fan-out, which reaches an entrance of any domain; mirror of entranceActionProblems.
+    fan_out = fans_out(action) and _fold(action) != "homeassistant.turn_off"
+    if dom and (fan_out or (dom in _entrance_domains(entrances) and not entrance_service_closes(action, f"{dom}.any", positions))):
+        keys, sel_ids, unknowable = _target_selection(node, action)
+        for key in INDIRECT_TARGET_KEYS:
+            if key in keys:
+                problems.append(f"{p}: action {action} may not select by {key} in a home with an entrance; name the entities")
+        if unknowable or any(_TEMPLATE_RE.search(i) or _fold(i) in ("all", "none") for i in sel_ids):
+            problems.append(f"{p}: action {action} has a target that cannot be known before it runs, which a home with an entrance does not allow; name the entities")
+    return problems
+
+
+def _entrance_device_problems(node: dict[str, Any], p: str, entrances: frozenset[str]) -> list[str]:
+    """The entrance half for a device action. Mirror of entranceDeviceProblems."""
+    if not entrances:
+        return []
+    domain = node.get("domain")
+    if not isinstance(domain, str) or not ("type" in node or "device_id" in node):
+        return []
+    d = _fold(domain)
+    if d not in _entrance_domains(entrances):
+        return []
+    kind = node.get("type")
+    folded = _fold(kind) if isinstance(kind, str) else ""
+    if folded == _ENTRANCE_CLOSING_DEVICE_TYPES.get(d, "turn_off") or folded in _ENTRANCE_READ_DEVICE_TYPES:
+        return []
+    ids = _entity_ids(node)
+    if not ids or any(_TEMPLATE_RE.search(i) or _entrance_id(i) in entrances for i in ids):
+        return [f"{p}: device action {domain}.{kind if kind is not None else 'undefined'} could open an entrance; {ENTRANCE_RULE}"]
+    return []
+
+
 # Raw remote codes (#568). Mirror of REMOTE_SEND_COMMAND in policy.ts, and a separate rule on purpose
 # so it can be dropped on its own: delete the `command` loop in `_remote_command_problems` (the caps
 # stay), and the same loop in policy.ts. The platform allowlist is box-only: `handlers/remotes.py`.
@@ -647,7 +794,9 @@ TARGET_KEYS: frozenset[str] = frozenset({"entity_id", "device_id", "area_id", "f
 Mirror of TARGET_KEYS in policy.ts."""
 
 
-def find_service_call_violations(domain: str, service: str, entity_ids: list[str], data: Any = None) -> list[str]:
+def find_service_call_violations(
+    domain: str, service: str, entity_ids: list[str], data: Any = None, entrances: frozenset[str] = _NO_ENTRANCES
+) -> list[str]:
     """Mirror of findServiceCallViolations in packages/shared/src/policy.ts.
 
     `data` is read for a valve's position (#527), so leaving it out refuses `set_valve_position`, and
@@ -710,6 +859,9 @@ def find_service_call_violations(domain: str, service: str, entity_ids: list[str
         # `homeassistant.toggle` forwards to `valve.toggle`; no other domain's service may move a valve.
         elif d == VALVE_DOMAIN and domain != VALVE_DOMAIN:
             problems.append(f"{eid}: a valve is moved only by its own services; {_VALVE_CLOSING_RULE}")
+        # An entrance only closes (R3): its own domain's closing service, whatever forwards to it.
+        if _entrance_id(eid) in entrances and not entrance_service_closes(full, eid, positions):
+            problems.append(f"{eid}: {ENTRANCE_RULE}")
     # Every key and value that is sent, nested ones included: `play_media` also takes `media:
     # {media_content_id}`. A target key is left out because both sides strip it rather than refuse it.
     # Service data is a mapping or nothing; anything else is refused rather than walked as a string.
@@ -1004,7 +1156,9 @@ def find_reference_violations(value: Any, path: str = "input") -> list[str]:
     return list(dict.fromkeys(problems))
 
 
-def find_policy_violations(config: Any, path: str = "config", *, registry_ids_resolved: bool = False) -> list[str]:
+def find_policy_violations(
+    config: Any, path: str = "config", *, registry_ids_resolved: bool = False, entrances: frozenset[str] = _NO_ENTRANCES
+) -> list[str]:
     """Human-readable violations for an automation or script config ([] = allowed). Mirror of `findPolicyViolations`.
 
     `registry_ids_resolved` is the box's one departure from the hub's walk, and only a caller that has
@@ -1055,6 +1209,8 @@ def find_policy_violations(config: Any, path: str = "config", *, registry_ids_re
             for eid in ids:
                 if _domain(eid) == VALVE_DOMAIN and dom != VALVE_DOMAIN:
                     problems.append(f"{p}: action {action} aimed at {eid} could open a valve; {_VALVE_CLOSING_RULE}")
+            # An entrance only closes (R3), after a delay or inside a scene's states as much as here.
+            problems.extend(_entrance_action_problems(node, action, ids, p, entrances))
             if dom == "scene":
                 problems.extend(f"{p}: action {action} could leave {eid} open; a scene may only close a valve" for eid in _scene_valve_ids(node))
                 problems.extend(_scene_template_violations(node, action, p))
@@ -1095,6 +1251,7 @@ def find_policy_violations(config: Any, path: str = "config", *, registry_ids_re
         # `determine_script_action` settles a node carrying two action keys by `ACTIONS_MAP` order.
         if isinstance(device_domain, str) and _fold(device_domain) == VALVE_DOMAIN and ("type" in node or "device_id" in node) and node.get("type") != "close":
             problems.append(f"{p}: device action on a valve could open it; only type close is allowed")
+        problems.extend(_entrance_device_problems(node, p, entrances))
         for k, v in node.items():
             if k in _LIST_KEYS or isinstance(v, (dict, list)):
                 visit(v, f"{p}.{k}")
@@ -1227,7 +1384,7 @@ def find_fan_out_violations(action: str, node: dict[str, Any], ids: list[str], p
     return problems
 
 
-def find_scene_policy_violations(config: Any) -> list[str]:
+def find_scene_policy_violations(config: Any, entrances: frozenset[str] = _NO_ENTRANCES) -> list[str]:
     entities = config.get("entities") if isinstance(config, dict) else None
     if not isinstance(entities, dict):
         return []
@@ -1236,6 +1393,9 @@ def find_scene_policy_violations(config: Any) -> list[str]:
     # `find_scene_write_violations`.
     return [f"entities.{eid}: denied domain {_domain(eid)}" for eid in entities if _domain(eid) in DENIED_ENTITY_DOMAINS] + [
         f"entities.{eid}: a scene may only close a valve" for eid, v in entities.items() if _domain(eid) == VALVE_DOMAIN and not _valve_state_closes(v)
+    ] + [
+        # An entrance only closes (R3), so a scene may set one only shut. Run and write alike. Mirror of policy.ts.
+        f"entities.{eid}: {ENTRANCE_RULE}" for eid, v in entities.items() if _entrance_id(eid) in entrances and not entrance_state_closes(str(eid), v)
     ] + [
         # A water heater's temperature (#560), when the scene is written and whenever it runs.
         f"entities.{eid}: {problem}"

@@ -31,6 +31,7 @@ from homeassistant.loader import async_get_config_flows, async_get_integrations
 
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
+from .entrances import entrance_ids, entry_holds_entrance
 from .flows import DENIED_DOMAINS, check_flow_input, check_secrets, check_switch_as_x_source, forget_fields, serialize_field_map, shape
 from .registry import _gates, entry_carries_gate, gated_entry, off_limits, visible
 
@@ -413,6 +414,8 @@ async def helpers_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
             "reconfiguring a template or threshold helper is not supported yet",
         )
     domain, item_id = split
+    if "name" in config:
+        _refuse_renaming_an_entrance(hass, helper_id)
     # A patch, not a replacement: what you leave out keeps its current value. See `_merged`.
     merged = _merged(hass, domain, item_id, dict(config))
     try:
@@ -422,12 +425,38 @@ async def helpers_update(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     return _item_dto(hass, domain, item)
 
 
+def _refuse_renaming_an_entrance(hass: HomeAssistant, helper_id: str) -> None:
+    """A helper that is an entrance keeps its name (R3, AgDR-0074, security re-review of e55c05e).
+
+    An `input_button` or a switch is an entrance by its name alone, so renaming "Garage opener" to
+    "Workshop" and pressing it would be a way to open the garage. Refused for a collection helper and
+    a config-entry helper alike, whether the entrance comes from its name, its class or its label:
+    a person renames it in Home Assistant.
+    """
+    entrances = entrance_ids(hass)
+    if not entrances:
+        return
+    split = _split_input_id(helper_id)
+    if split is not None:
+        # The entity is found through the registry's `unique_id`, which is the item id: its entity id
+        # comes from the name it was created with, and need not be `<domain>.<item id>`.
+        domain, item_id = split
+        entity_id = er.async_get(hass).async_get_entity_id(domain, domain, item_id) or helper_id
+        held = entity_id.lower() in entrances
+    else:
+        entry = hass.config_entries.async_get_entry(helper_id)
+        held = entry is not None and entry_holds_entrance(hass, entry, entrances)
+    if held:
+        raise RpcError("method_not_allowed", "this helper is an entrance, so Hearth does not rename it; rename it in Home Assistant")
+
+
 async def helpers_rename(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, Any]:
     """The owner's name for a helper, for either kind. The entity id never changes."""
     helper_id = require_str(params, "id")
     name = require_str(params, "name")
     if not name.strip() or len(name) > 255:
         raise RpcError("invalid_params", "name must be 1..255 characters")
+    _refuse_renaming_an_entrance(hass, helper_id)
 
     split = _split_input_id(helper_id)
     if split is not None:
@@ -483,6 +512,11 @@ async def helpers_delete(hass: HomeAssistant, params: dict[str, Any]) -> dict[st
     # names neither the gate nor what it drives; `helpers.list` already shows this entry restricted.
     if entry_carries_gate(hass, entry):
         raise RpcError("method_not_allowed", f"something Hearth does not operate depends on {entry.title}; Hearth does not remove it")
+    # An entrance rests on this helper (R3, AgDR-0074): removing a `switch_as_x` wrapper over one hands
+    # its relay back un-hidden and exposed, as a switch whose own name may not say what it opens; a
+    # group or template that is one goes with the protection on it.
+    if entry_holds_entrance(hass, entry):
+        raise RpcError("method_not_allowed", f"{entry.title} is or wraps an entrance; Hearth does not remove it")
     removed = _entry_dto(hass, entry)["entities"]
     if not await hass.config_entries.async_remove(entry.entry_id):
         raise RpcError("ha_error", "Home Assistant did not remove that helper")

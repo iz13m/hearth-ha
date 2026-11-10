@@ -15,14 +15,15 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
 from ..labels import is_hearth_scene
-from ..policy import TARGET_KEYS, VALVE_DOMAIN, find_service_call_violations
+from ..policy import ENTRANCE_REFUSAL, TARGET_KEYS, raise_refusal, VALVE_DOMAIN, find_service_call_violations
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
+from .entrances import entrance_ids
 from .notify import notify_call_violations
 from .remotes import remote_call_violations
 from .registry import OFF_LIMITS, GateMap, MembershipUnwalkable, _exposed, _gates, effective_domain, expand_members, off_limits, visible
 from .scenes import scene_run_violations
-from .scripts import script_run_violations
+from .scripts import script_entrance_violations, script_run_violations
 from .water_heater import water_heater_call_violations
 
 # Service calls can legitimately take a while (thermostats, media players); scripts return
@@ -141,6 +142,15 @@ async def devices_call(hass: HomeAssistant, params: dict[str, Any], capabilities
         if gate != entity_id.split(".", 1)[0].lower():
             raise RpcError("method_not_allowed", f"{entity_id}: this drives a {gate}; Hearth refuses it through any other domain's service")
 
+    # An entrance only closes, for every caller (R3, AgDR-0074): this side cannot tell a model from a
+    # person, so the app's own open waits for the person's path behind `access.control`, as a valve's
+    # does (#527). After `visible()`, so an id the model may not see is still refused as unknown rather
+    # than named an entrance. A group holding one is one (`entrance_ids` walks it). Built fresh, so a
+    # label added a moment ago already counts.
+    entrances = entrance_ids(hass) & frozenset(e.lower() for e in raw_ids)
+    if entrances and (problems := find_service_call_violations(domain, service, raw_ids, params.get("data"), entrances)):
+        raise RpcError("method_not_allowed", "; ".join(problems), dict(ENTRANCE_REFUSAL))
+
     # A remote command is sent or taught only to a remote whose integration plays stored names alone (#568, F1).
     # After `visible()`, so an id the model may not see is still refused as unknown rather than named.
     if problems := remote_call_violations(hass, domain, service, raw_ids, params.get("data")):
@@ -248,6 +258,8 @@ async def member_violations(
                 problems += [f"{entity_id}: this group holds {member}, which may not be activated: {v}" for v in found]
             elif literal == "script" and is_hearth_scene(hass, member) and (found := await script_run_violations(hass, member)):
                 problems += [f"{entity_id}: this group holds {member}, which may not be run: {v}" for v in found]
+            elif literal == "script" and (found := await script_entrance_violations(hass, member)):
+                problems += [f"{entity_id}: this group holds {member}, which may not be run: {v}" for v in found]
     return list(dict.fromkeys(problems))
 
 
@@ -293,7 +305,7 @@ async def scenes_activate(hass: HomeAssistant, params: dict[str, Any]) -> dict[s
     """
     entity_id = _require_runnable(hass, params, "scene")
     if violations := await scene_run_violations(hass, entity_id):
-        raise RpcError("method_not_allowed", "; ".join(violations))
+        raise_refusal("method_not_allowed", violations)
     return await _run_entity(hass, params, "scene")
 
 
@@ -312,7 +324,11 @@ async def scripts_run(hass: HomeAssistant, params: dict[str, Any]) -> dict[str, 
     entity_id = _require_runnable(hass, params, "script")
     # Short-circuited on the label, so an ordinary script pays neither the file read nor the walk.
     if is_hearth_scene(hass, entity_id) and (violations := await script_run_violations(hass, entity_id)):
-        raise RpcError("method_not_allowed", "; ".join(violations))
+        raise_refusal("method_not_allowed", violations)
+    # Any readable script, labelled or not, that would open an entrance (R3, AgDR-0074): the one part
+    # of a household script AgDR-0005's licence no longer covers.
+    if violations := await script_entrance_violations(hass, entity_id):
+        raise RpcError("method_not_allowed", "; ".join(violations), dict(ENTRANCE_REFUSAL))
     return await _run_entity(hass, params, "script")
 
 

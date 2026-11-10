@@ -32,7 +32,7 @@ from typing import Any
 from homeassistant.helpers import category_registry as cr, entity_registry as er, label_registry as lr
 from homeassistant.core import HomeAssistant
 
-from ..labels import ALL_LABELS, ROLES, hearth_label_of
+from ..labels import ALL_LABELS, ROLES, SAFETY_ROLES, hearth_label_of
 from ..rpc import Dispatcher, RpcError
 from .common import require_str
 from .registry import _gates, off_limits, visible
@@ -45,10 +45,16 @@ MAX_TARGETS = 100
 
 
 def _check_not_hearths(hass: HomeAssistant, label_id: str) -> None:
-    """Refuse to touch one of Hearth's own labels: the presentation five (AgDR-0034) and `Hearth: scene` (#617)."""
+    """Refuse to touch one of Hearth's own labels: the presentation five (AgDR-0034), `Hearth: scene` (#617) and `Hearth: entrance` (AgDR-0074)."""
     role = hearth_label_of(hass, label_id)
     if role is not None:
-        what = "decides how the app shows a device" if role in ROLES else "marks a script whose contents are checked each time it runs"
+        if role in ROLES:
+            what = "decides how the app shows a device"
+        elif role in SAFETY_ROLES:
+            # AgDR-0074: taking it off is how an assistant would make an entrance something it may open.
+            what = "marks an entrance that no assistant may open"
+        else:
+            what = "marks a script whose contents are checked each time it runs"
         raise RpcError(
             "method_not_allowed",
             f"'{ALL_LABELS[role]}' is one of Hearth's own labels and {what}; "

@@ -144,7 +144,10 @@ def test_the_walkers_agree_on_every_shared_case() -> None:
     cases = json.loads(SCHEMA.read_text())["policy_walk_cases"]
     assert len(cases) > 10, "run pnpm --filter @hearth/shared export:jsonschema first"
     for case in cases:
-        assert find_policy_violations(case["config"]) == case["violations"], case["name"]
+        # An entrance case carries the home's entrances (R3), which on the box come from `handlers/entrances.py`.
+        entrances = frozenset(case.get("entrances") or ())
+        assert find_policy_violations(case["config"], entrances=entrances) == case["violations"], case["name"]
+    assert any(c.get("entrances") for c in cases), "the corpus must pin the entrance rule (R3)"
 
 
 def test_a_lock_hiding_in_scene_data_is_found() -> None:
@@ -291,7 +294,8 @@ def test_the_service_call_walkers_agree_on_every_shared_case() -> None:
     assert len(cases) > 10, "run pnpm --filter @hearth/shared export:jsonschema first"
     for case in cases:
         i = case["input"]
-        assert find_service_call_violations(i["domain"], i["service"], i["entityIds"], i.get("data")) == case["violations"], case["name"]
+        entrances = frozenset(case.get("entrances") or ())
+        assert find_service_call_violations(i["domain"], i["service"], i["entityIds"], i.get("data"), entrances) == case["violations"], case["name"]
 
 
 def test_our_key_set_matches_home_assistants_service_schema() -> None:

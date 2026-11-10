@@ -33,8 +33,9 @@ from ..policy import (
 )
 from ..rpc import Dispatcher, RpcError
 from .common import check_hearth_scene_kept, lock_for, plain, read_yaml, require_config, require_str, write_yaml
-from .registry import GateMap, _gates, run_fields, visible
+from .registry import GateMap, MembershipUnwalkable, _gates, expand_members, group_members, run_fields, visible
 from .resolve import resolve_registry_ids
+from .entrances import entrance_ids
 from .gated import find_gate_violations
 from .notify import find_notify_violations
 from .remotes import find_remote_violations
@@ -48,6 +49,7 @@ from .scenes import (
     find_scene_run_violations,
     gated_refusals,
 )
+from ..policy import ENTRANCE_RULE, find_scene_policy_violations
 
 _SLUG = re.compile(r"^[a-z0-9_]+$")
 
@@ -98,6 +100,84 @@ async def _validate(hass: HomeAssistant, key: str, config: dict[str, Any]) -> di
     return {"ok": True, "status": "ok"}
 
 
+def _generic_script_starts(hass: HomeAssistant, config: Any) -> list[str]:
+    """Scripts a config starts through `homeassistant.turn_on`/`toggle`, named or as a group's members."""
+    out: list[str] = []
+    for action, node in _action_nodes(config):
+        if action.lower() not in ("homeassistant.turn_on", "homeassistant.toggle"):
+            continue
+        _keys, ids, _unknowable = _target_selection(node, action)
+        for eid in (i.lower() for i in ids):
+            if eid.startswith("script."):
+                out.append(eid)
+            elif group_members(hass, eid):
+                try:
+                    out += [m for m in expand_members(hass, eid, stop=frozenset({"scene", "script", "automation"})) if m.startswith("script.")]
+                except MembershipUnwalkable:
+                    continue  # an entrance in such a home already (`entrance_ids`)
+    return list(dict.fromkeys(out))
+
+
+def _entrance_only(config: Any, where: str, entrances: frozenset[str]) -> list[str]:
+    """What the walk refuses about this config **because of the home's entrances**, and nothing else."""
+    without = set(find_policy_violations(config, where, registry_ids_resolved=True))
+    return [v for v in find_policy_violations(config, where, registry_ids_resolved=True, entrances=entrances) if v not in without]
+
+
+async def script_entrance_violations(hass: HomeAssistant, entity_id: str, entrances: frozenset[str] | None = None) -> list[str]:
+    """Why a household script may not run: it would open an entrance (R3, AgDR-0074). Empty means it may.
+
+    **Only the entrance rule, on any script Hearth can read.** AgDR-0005 licenses a script to do
+    whatever its owner wrote, and that stays true of everything else in it; the council's ruling is
+    that no model on any tier opens an entrance, and running the household's "open garage" script is
+    a model opening it. So the walk is run with the home's entrances and only what that adds is kept:
+    an open on an entrance, a scene state that leaves one open, an opening target that cannot be named
+    in a home with one. **Every script it starts, however deep**, and the stored states of every scene
+    any of them activates. A started script Hearth cannot follow — a templated id, `all`/`none`, an id
+    that is not a script, one Home Assistant holds no config for, a missing blueprint — is refused in a
+    home with an entrance, as `find_nested_script_violations` refuses it at authoring time (security
+    re-review of e55c05e). The script that was asked to run is not refused for being unreadable itself:
+    it runs as AgDR-0005 let it. **Still out of reach** (AgDR-0074): a household script that fires a
+    household automation (an automation is never followed here) or flips a helper an automation watches.
+    """
+    entrances = entrance_ids(hass) if entrances is None else entrances
+    if not entrances:
+        return []
+    problems: list[str] = []
+    seen: set[str] = set()
+    todo: list[tuple[str, str, int]] = [(entity_id.lower(), "config", 0)]
+    while todo:
+        eid, where, depth = todo.pop(0)
+        if eid in seen:
+            continue
+        seen.add(eid)
+        started = depth > 0
+        if eid in ("all", "none") or _TEMPLATE_RE.search(eid) or not eid.startswith("script."):
+            problems.append(f"{where}: starts {eid}, which is not one script Hearth can follow, in a home with an entrance; {ENTRANCE_RULE}")
+            continue
+        raw = _script_raw_config(hass, eid)
+        if not isinstance(raw, dict) or "use_blueprint" in raw:
+            if started:
+                problems.append(f"{where}: starts {eid}, which Hearth cannot read, in a home with an entrance; {ENTRANCE_RULE}")
+            continue
+        raw, _unresolved = resolve_registry_ids(hass, plain(raw), where)
+        problems += _entrance_only(raw, where, entrances)
+        for action, node in _action_nodes(raw):
+            if action.lower() != "scene.turn_on":
+                continue
+            _keys, ids, _unknowable = _target_selection(node, action)
+            for scene in dict.fromkeys(i.lower() for i in ids if i.lower().startswith("scene.")):
+                config = await _config_for_entity(hass, scene)
+                if isinstance(config, dict):
+                    without = set(find_scene_policy_violations(config))
+                    problems += [f"{where}->{scene}: {v}" for v in find_scene_policy_violations(config, entrances) if v not in without]
+        todo += [(s, f"{where}->{s}", depth + 1) for s, _ in _script_targets(raw, where)]
+        # `homeassistant.turn_on`/`toggle` of a script, or of a group holding one, starts it too
+        # (security's third round): followed as a start, not only refused as an entrance's id.
+        todo += [(s, f"{where}->{s}", depth + 1) for s in _generic_script_starts(hass, raw)]
+    return list(dict.fromkeys(problems))
+
+
 async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict[str, Any]]:
     path = _path(hass)
     async with lock_for(path):
@@ -106,6 +186,7 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
     out = []
     ent_reg = er.async_get(hass)
     gates = _gates(hass)
+    entrances = entrance_ids(hass)
     for state in sorted(hass.states.async_all(SCRIPT_DOMAIN), key=lambda s: s.entity_id):
         key = state.entity_id.split(".", 1)[1]
         ent = ent_reg.async_get(state.entity_id)
@@ -116,7 +197,9 @@ async def scripts_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dict
         # scan `scripts.run` makes too (#759), in the same order: a script nobody can see is not read.
         shown = visible(hass, state.entity_id, ent, gates)
         # The copy read above, as `scenes_list` passes `by_id`: one file read for the whole list.
-        refused = shown and labelled and bool(await script_run_violations(hass, state.entity_id, data))
+        refused = shown and labelled and bool(await script_run_violations(hass, state.entity_id, data, entrances))
+        # Any script that would open an entrance, labelled or not (R3, AgDR-0074), as `scripts.run` asks.
+        refused = refused or (shown and bool(await script_entrance_violations(hass, state.entity_id, entrances)))
         out.append(
             {
                 "id": key,
@@ -231,7 +314,7 @@ def _script_key(hass: HomeAssistant, entity_id: str) -> str:
     return entity_id.split(".", 1)[1] if "." in entity_id else entity_id
 
 
-async def script_run_violations(hass: HomeAssistant, entity_id: str, data: Any = None) -> list[str]:
+async def script_run_violations(hass: HomeAssistant, entity_id: str, data: Any = None, entrances: frozenset[str] | None = None) -> list[str]:
     """
     Why a script Hearth presents as a scene may not run. Empty means it may.
 
@@ -268,7 +351,9 @@ async def script_run_violations(hass: HomeAssistant, entity_id: str, data: Any =
         return []
     config, _unresolved = resolve_registry_ids(hass, config)  # unresolved is allowed, see above
     # Resolved above, and an id that did not resolve is allowed at run time, so the walker is told (#663).
-    problems = find_policy_violations(config, registry_ids_resolved=True) + find_reference_violations(config, "config")
+    # With the entrances (R3, AgDR-0074): a scene with steps may close one and never open one.
+    entrances = entrance_ids(hass) if entrances is None else entrances
+    problems = find_policy_violations(config, registry_ids_resolved=True, entrances=entrances) + find_reference_violations(config, "config")
     # Literal, the two above: a switch a `switch_as_x` helper presents as a lock, siren or valve, or a
     # group over one, is just a switch to them (#643). Every id-shaped string counts, a condition's
     # included: this is a scene, and a scene is refused for what it touches.

@@ -29,8 +29,9 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 
 from ..const import DOMAIN
-from ..policy import find_policy_violations, find_reference_violations
+from ..policy import ENTRANCE_REFUSAL, ENTRANCE_RULE, find_policy_violations, find_reference_violations
 from ..rpc import RpcError
+from .entrances import entrance_ids, find_entrance_named
 from .gated import find_gate_violations
 from .notify import find_notify_violations
 from .remotes import find_remote_violations
@@ -508,7 +509,15 @@ async def check_flow_input(hass: HomeAssistant, config: Any) -> None:
     config, problems = resolve_registry_ids(hass, config, "input", any_key=True)
     # Resolved, and what did not resolve is refused above without repeating the value, which can be a
     # BLE key here; so the walker, which would name it, is told (#663).
-    problems += find_policy_violations(config, "input", registry_ids_resolved=True) + find_reference_violations(config, "input")
+    # With the home's entrances (R3, AgDR-0074): a template switch whose `turn_on` opens the garage is
+    # a stored way to open it, as an authored script would be.
+    entrances = entrance_ids(hass)
+    problems += find_policy_violations(config, "input", registry_ids_resolved=True, entrances=entrances) + find_reference_violations(
+        config, "input"
+    )
+    # And any value that names an entrance at all: a group, template or wrapper over one is a new
+    # entity an open could already have been authored against (review of 3a01d37).
+    problems += find_entrance_named(hass, config, "input", entrances)
     # Literal, the two above. A form value naming a switch a `switch_as_x` gate covers is a new way to
     # move it: a group over the relay, or a template switch whose action calls it (#643, ruling 6).
     problems += find_gate_violations(hass, config, "input", mode="form")
@@ -550,3 +559,7 @@ def check_switch_as_x_source(hass: HomeAssistant, domain: str, user_input: dict[
         raise RpcError("not_found", f"unknown entity {value}")
     if (gate := gates.get(source)) is not None:
         raise RpcError("method_not_allowed", f"{value}: this drives a {gate}; Hearth does not wrap it again")
+    # A wrapper over an entrance is a new id an open could already have been authored against, and
+    # its own name need not say what it opens (R3, AgDR-0074).
+    if source in entrance_ids(hass):
+        raise RpcError("method_not_allowed", f"{value}: this is an entrance; Hearth does not wrap it. {ENTRANCE_RULE}", dict(ENTRANCE_REFUSAL))

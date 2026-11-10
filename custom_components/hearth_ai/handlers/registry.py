@@ -185,7 +185,13 @@ def _device_name(ent: Any, dev_reg: dr.DeviceRegistry | None) -> str | None:
 
 
 def entity_dto(
-    hass: HomeAssistant, state: Any, ent: Any, area_id: str | None, dev_reg: dr.DeviceRegistry | None, gates: GateMap | None = None
+    hass: HomeAssistant,
+    state: Any,
+    ent: Any,
+    area_id: str | None,
+    dev_reg: dr.DeviceRegistry | None,
+    gates: GateMap | None = None,
+    entrances: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """One entity in the shape `Entity` describes, so a pushed change and a polled one agree.
 
@@ -207,9 +213,25 @@ def entity_dto(
         # The Hearth labels on this entity and its device, as found. The hub decides what they mean
         # (AgDR-0034), so a rule change never needs a release of this integration.
         "hearth_labels": hearth_labels(hass, ent, dev_reg),
+        # An entrance no assistant may open (AgDR-0074). Decided here because only this side sees the
+        # class, the label and the name; the hub's voice path reads it to refuse the open before it
+        # sends anything. A list passes the whole home's set; the push asks about one entity.
+        "entrance": state.entity_id.lower() in entrances if entrances is not None else _entrance_of(hass, state.entity_id),
         "state": state.state,
         "attributes": filter_attributes(hass, dict(state.attributes), gates),
     }
+
+
+def _entrance_of(hass: HomeAssistant, entity_id: str) -> bool:
+    from .entrances import entrance_of  # noqa: PLC0415 - entrances imports this module
+
+    return entrance_of(hass, entity_id)
+
+
+def entrance_ids(hass: HomeAssistant) -> frozenset[str]:
+    from .entrances import entrance_ids as _ids  # noqa: PLC0415 - entrances imports this module
+
+    return _ids(hass)
 
 
 def _category(ent: Any) -> str | None:
@@ -613,6 +635,7 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
     gates = _gates(hass)
+    entrances: frozenset[str] | None = None
     out: list[dict[str, Any]] = []
     for state in sorted(hass.states.async_all(), key=lambda s: s.entity_id):
         # Keyset paging. Iteration is already sorted by entity_id, so "resume past this id" needs no
@@ -632,7 +655,10 @@ async def entities_list(hass: HomeAssistant, params: dict[str, Any]) -> list[dic
         name = state.name
         if query and query not in state.entity_id.lower() and query not in (name or "").lower():
             continue
-        out.append(entity_dto(hass, state, ent, entity_area, dev_reg, gates))
+        if entrances is None:
+            # Once per page, and only once something is on it.
+            entrances = entrance_ids(hass)
+        out.append(entity_dto(hass, state, ent, entity_area, dev_reg, gates, entrances))
         if len(out) >= limit:
             break
     return out
